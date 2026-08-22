@@ -54,6 +54,11 @@ scu200_ai_demo/
 │       ├── mnist_wblob.bin        weights (INT8) → DDR 0xB0000000
 │       ├── mnist_pblob.bin        biases + requant params (INT32) → DDR 0xB0010000
 │       └── mnist_tests.bin        20 verification samples (C-sim / HW spot-check)
+├── Vitis/                         MicroBlaze bare-metal application (boot image)
+│   ├── Makefile                   Vitis workspace + bootfile build (target: scu200_ai_demo01)
+│   ├── py/                        build-vitis.py, make-boot.py, args.json (bd_name=scu200_ai_demo01)
+│   └── common/src/                42 driver/app files — main.c, mbdpu01 (MNIST) driver, mnist_pre,
+│                                  disc_strobe, ov9281, motor, HDMI/I2C/clocking, frmbuf, pipe …
 └── Vivado/
     ├── Makefile                   top-level Vivado build (target: scu200_ai_demo01)
     ├── scripts/
@@ -124,6 +129,39 @@ tolerates exactly two benign critical warnings on this design and fails on any o
 
 ---
 
+## Stage 2 — Build the Vitis application + boot image
+
+The MicroBlaze bare-metal app builds from `Vitis/common/src/` against the XSA exported by Stage 1.
+
+### From the repo root (one shot)
+```bash
+make bootimage TARGET=scu200_ai_demo01 JOBS=8
+```
+Orchestrates: create the Vitis workspace/platform from the XSA → compile the app (`test_app.elf`) →
+generate the boot bitstream → gather `bootimages/scu200_ai_demo_scu200_ai_demo01_standalone-2025-2.zip`.
+(If the Stage-1 XSA isn't built yet, the dependency triggers the Vivado build first.)
+
+### Or drive Vitis directly
+```bash
+cd Vitis
+make workspace TARGET=scu200_ai_demo01   # workspace + BSP + platform from the XSA
+make bootfile  TARGET=scu200_ai_demo01   # compile app -> boot/scu200_ai_demo01/scu200_ai_demo01.bit
+```
+
+**Expected outputs:**
+- `Vitis/scu200_ai_demo01_workspace/test_app/build/test_app.elf`
+- `Vitis/boot/scu200_ai_demo01/scu200_ai_demo01.bit`
+
+### Notes
+- `Vitis/py/args.json` sets `bd_name = scu200_ai_demo01` (matches the Stage-1 wrapper/`.hwh`) and
+  `app_name = test_app`; `common/src/` is the single source of truth (copied into the workspace).
+- **No `data.json` needed** — the target is passed explicitly (`DATA_JSON = none`), so the repo is
+  self-contained.
+- The MNIST classifier driver is `mbdpu01.{c,h}` (`mbdpu01_infer`), keyed off `XPAR_MBDPU01_*` from
+  the block design's `mbdpu01` core. The unused milestone-1 loopback core was dropped.
+
+---
+
 ## Known issues
 
 - **Triggered-capture drift (motor encoder).** The angle strobe is driven by the motor's
@@ -144,7 +182,8 @@ tolerates exactly two benign critical warnings on this design and fails on any o
 ---
 
 ## Coming next (later stages)
-- **Vitis application** (`Vitis/common/src`, MicroBlaze bare-metal) + build scripts.
-- **Programming / run scripts** (`program.tcl`, weight/gallery JTAG scripts).
-- **Capture & retrain** tooling (ROI recording → `roi_export.py` → `train_mnist_real.py`) and the
-  UART control cheat-sheet.
+- **Programming / run scripts** (`scripts/program.tcl` + live weight/gallery JTAG reload) — load
+  the PDI + ELF + weight blobs + background image to the board.
+- **Capture & retrain tooling** wired end-to-end (`dump_gallery.tcl` → `tools/roi_export.py` →
+  `Vivado/ip/mbdpu01/train_mnist_real.py` → reload) and the UART control cheat-sheet.
+- A `tools/png_to_rgb888.py` converter so the HDMI background `.bin` regenerates from the PNG art.

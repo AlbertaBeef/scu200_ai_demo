@@ -22,6 +22,14 @@
 /train/**/*.baseline.bin
 /train/**/*.prev.bin
 
+# ---- Vitis generated (regenerable via `make`) ----
+/Vitis/*_workspace/
+/Vitis/boot/
+/Vitis/.Xil/
+/Vitis/RemoteSystemsTempFiles/
+/Vitis/.*.lock
+/Vitis/*.log
+
 # ---- top-level boot-image output ----
 /bootimages/
 /.*.lock

@@ -1,0 +1,18 @@
+{
+    "bd_name": "scu200_ai_demo01",
+    "app_name": "test_app",
+    "app_template": "None",
+    "src": {
+        "all": "common/src",
+        "mb": "",
+        "zynq": "",
+        "zynqmp": "",
+        "versal": ""
+    },
+    "combine_bit_elf": false,
+    "stack_size": "0x10000",
+    "heap_size": "0x10000",
+    "boardnames": {
+        "scu200_ai_demo01": "SCU200"
+    }
+}

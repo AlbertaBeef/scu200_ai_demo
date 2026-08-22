@@ -1,0 +1,26 @@
+# ---- Vivado generated (regenerable via `make`) ----
+/Vivado/scu200_ai_demo01/
+/Vivado/ip/build/
+/Vivado/.gen/
+/Vivado/.srcs/
+/Vivado/.Xil/
+/Vivado/logs/
+/Vivado/*.log
+/Vivado/*.jou
+/Vivado/*.backup.*
+/Vivado/.*.lock
+/Vivado/ip/*.log
+/Vivado/ip/*.jou
+/Vivado/ip/mbdpu01/data/          # MNIST dataset (torchvision download; retrain only)
+
+# ---- capture datasets: keep *.npz + manifest.csv; ignore raw/derived (regenerable) ----
+/train/captures/**/roi_gallery.bin
+/train/captures/**/crop/
+/train/captures/**/img28/
+/train/captures/**/contact_sheet.png
+/train/**/*.baseline.bin
+/train/**/*.prev.bin
+
+# ---- generic ----
+*.pyc
+__pycache__/

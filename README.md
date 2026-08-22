@@ -59,6 +59,17 @@ scu200_ai_demo/
 │   ├── py/                        build-vitis.py, make-boot.py, args.json (bd_name=scu200_ai_demo01)
 │   └── common/src/                42 driver/app files — main.c, mbdpu01 (MNIST) driver, mnist_pre,
 │                                  disc_strobe, ov9281, motor, HDMI/I2C/clocking, frmbuf, pipe …
+├── scripts/                       JTAG program + hot-reload + gallery-dump (xsct .tcl)
+│   ├── program.tcl               FPGA .pdi + app ELF + background + weight blobs → board
+│   ├── reload_elf.tcl            hot-reload the ELF only (fast edit loop)
+│   ├── reload_elf_bg.tcl         reload ELF + refresh background
+│   ├── reload_weights.tcl        live weight reload (retrained model, no rebuild)
+│   └── dump_gallery.tcl          dump the ROI capture gallery (DDR 0xBA000000) → .bin
+├── tools/                         host-side Python
+│   ├── roi_export.py             gallery .bin → labeled captures_{28x28,112x112}.npz
+│   └── png_to_rgb888.py          background PNG → 1920×1080 RGB888 blob (DDR 0xB4000000)
+├── assets/
+│   └── scu200_ai_demo01_background.png   HDMI background art (source for the bg blob)
 └── Vivado/
     ├── Makefile                   top-level Vivado build (target: scu200_ai_demo01)
     ├── scripts/
@@ -162,6 +173,52 @@ make bootfile  TARGET=scu200_ai_demo01   # compile app -> boot/scu200_ai_demo01/
 
 ---
 
+## Stage 3 — Program the board & the capture → retrain loop
+
+All host/JTAG scripts use paths relative to the repo, so run them from the repo root with the
+board connected. **Power-cycle the board before re-programming** (the ES1 part can wedge otherwise).
+
+### Program (first boot)
+Generate the background blob once (it's gitignored — regenerated from the committed PNG), then
+program the FPGA + app + DDR data over JTAG:
+```bash
+python3 tools/png_to_rgb888.py      # assets/…background.png → …_background_rgb.bin (1920×1080 RGB888)
+xsct scripts/program.tcl            # .pdi + test_app.elf + bg (0xB4000000) + weights (0xB0000000/0xB0010000)
+```
+You should get the boot banner on UART, HDMI up with the background, the live camera window, and
+the motor/strobe running.
+
+### Fast iteration (no re-program)
+| Script | Reloads | Use when |
+|--------|---------|----------|
+| `xsct scripts/reload_elf.tcl`     | app ELF only          | you rebuilt `test_app.elf` |
+| `xsct scripts/reload_elf_bg.tcl`  | app ELF + background   | …and changed the background art |
+| `xsct scripts/reload_weights.tcl` | weight/param blobs     | you retrained the model (below) |
+
+### Capture → label → retrain → deploy
+The `mbdpu01` core is **weight-agnostic** (reads the blobs from DDR each inference), so a retrained
+model deploys with a weight reload alone — no bitstream or ELF rebuild.
+```bash
+# 1. On the board: press 'w' to arm capture, spin the disc until REC fills (e.g. 1024/1024).
+# 2. Dump the on-DDR gallery to the host:
+xsct scripts/dump_gallery.tcl                 # → train/captures/roi_gallery.bin
+# 3. Auto-label by angular slot (disc layout 1..8) → the two aligned datasets:
+python3 tools/roi_export.py --bin train/captures/roi_gallery.bin \
+        --out train/captures/mnist_takeNN --map 1,2,3,4,5,6,7,8
+# 4. Retrain + PTQ on inverted-MNIST mixed with the real captures → new INT8 blobs:
+./venv/bin/python3 Vivado/ip/mbdpu01/train_mnist_real.py \
+        --real train/captures/mnist_take01/captures_28x28.npz \
+               train/captures/mnist_take02/captures_28x28.npz \
+        --out train/mbdpu01
+# 5. Live-deploy the retrained weights (no rebuild):
+xsct scripts/reload_weights.tcl
+```
+`roi_export.py` auto-labels **circularly** (a sample completing just past the position wrap folds
+back to the correct slot instead of landing in slot 0) and writes `captures_28x28.npz` (model input)
++ `captures_112x112.npz` (raw crop), row-for-row aligned with `manifest.csv`.
+
+---
+
 ## Known issues
 
 - **Triggered-capture drift (motor encoder).** The angle strobe is driven by the motor's
@@ -182,8 +239,6 @@ make bootfile  TARGET=scu200_ai_demo01   # compile app -> boot/scu200_ai_demo01/
 ---
 
 ## Coming next (later stages)
-- **Programming / run scripts** (`scripts/program.tcl` + live weight/gallery JTAG reload) — load
-  the PDI + ELF + weight blobs + background image to the board.
-- **Capture & retrain tooling** wired end-to-end (`dump_gallery.tcl` → `tools/roi_export.py` →
-  `Vivado/ip/mbdpu01/train_mnist_real.py` → reload) and the UART control cheat-sheet.
-- A `tools/png_to_rgb888.py` converter so the HDMI background `.bin` regenerates from the PNG art.
+- **`CONSOLE_KEYS.md`** — the UART control cheat-sheet (verbose/help, capture `w`, `cpr` trim
+  `C`/`V`, motor keys, etc.).
+- **`LICENSE`** and any remaining docs.

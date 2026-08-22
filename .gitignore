@@ -30,6 +30,9 @@
 /Vitis/.*.lock
 /Vitis/*.log
 
+# ---- generated background blob (regenerate: python3 tools/png_to_rgb888.py) ----
+/assets/*_rgb.bin
+
 # ---- top-level boot-image output ----
 /bootimages/
 /.*.lock

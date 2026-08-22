@@ -11,6 +11,7 @@
 /Vivado/.*.lock
 /Vivado/ip/*.log
 /Vivado/ip/*.jou
+/Vivado/ip/logs/
 /Vivado/ip/mbdpu01/data/          # MNIST dataset (torchvision download; retrain only)
 
 # ---- capture datasets: keep *.npz + manifest.csv; ignore raw/derived (regenerable) ----
@@ -20,6 +21,10 @@
 /train/captures/**/contact_sheet.png
 /train/**/*.baseline.bin
 /train/**/*.prev.bin
+
+# ---- top-level boot-image output ----
+/bootimages/
+/.*.lock
 
 # ---- generic ----
 *.pyc

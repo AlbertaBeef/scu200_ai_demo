@@ -40,6 +40,7 @@ ROIs can be recorded to retrain the classifier.
 scu200_ai_demo/
 ├── README.md                      ← this file (build instructions)
 ├── .gitignore
+├── Makefile                       top-level orchestration: `make bootimage` → Vitis app + boot zip
 ├── train/                         all training material
 │   ├── captures/                  labeled ROI datasets (core-agnostic, shared across cores)
 │   │   ├── mnist_take01/          session 1 (centered framing)

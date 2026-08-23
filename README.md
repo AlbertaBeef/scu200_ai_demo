@@ -39,6 +39,8 @@ ROIs can be recorded to retrain the classifier.
 ```
 scu200_ai_demo/
 ├── README.md                      ← this file (build instructions)
+├── CONSOLE_KEYS.md                UART key cheat-sheet (motor / strobe / crop / capture)
+├── LICENSE                        MIT
 ├── .gitignore
 ├── Makefile                       top-level orchestration: `make bootimage` → Vitis app + boot zip
 ├── train/                         all training material
@@ -186,7 +188,9 @@ python3 tools/png_to_rgb888.py      # assets/…background.png → …_backgroun
 xsct scripts/program.tcl            # .pdi + test_app.elf + bg (0xB4000000) + weights (0xB0000000/0xB0010000)
 ```
 You should get the boot banner on UART, HDMI up with the background, the live camera window, and
-the motor/strobe running.
+the motor/strobe running. Drive the demo over the serial console (`115200 8N1`); press `?` for the
+key list, or see **[`CONSOLE_KEYS.md`](CONSOLE_KEYS.md)** (motor, angle strobe, ROI crop, capture,
+the `cpr` drift-trim, …).
 
 ### Fast iteration (no re-program)
 | Script | Reloads | Use when |
@@ -238,7 +242,6 @@ back to the correct slot instead of landing in slot 0) and writes `captures_28x2
 
 ---
 
-## Coming next (later stages)
-- **`CONSOLE_KEYS.md`** — the UART control cheat-sheet (verbose/help, capture `w`, `cpr` trim
-  `C`/`V`, motor keys, etc.).
-- **`LICENSE`** and any remaining docs.
+## License
+
+MIT — see [`LICENSE`](LICENSE).

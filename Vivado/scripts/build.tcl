@@ -248,13 +248,13 @@ if { $board_name == "scu200" } {
   set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED false $obj
 }
 
-# scu200_hdmitx_mipi1_optimized: NOTE — a top-level AreaOptimized_high synth
+# NOTE — a top-level AreaOptimized_high synth (SCU200 ES1)
 # directive was tried here and reverted: it changed utilization by ZERO (the
 # design is ~90% pre-synthesized Xilinx IP, unaffected by the top synth
 # directive) and only perturbed placement enough to trigger a DDR4 clock
 # CRITICAL WARNING (Place 30-894) that fails the check_warnings gate. Real
 # resource savings on this variant come from removing/shrinking IP (v_tpg,
-# v_proc, HDMI-FRL) in bd_scu200_hdmitx_mipi1_optimized.tcl, not synth options.
+# v_proc, HDMI-FRL) in the block design, not synth options.
 
 # set the current impl run
 current_run -implementation [get_runs impl_1]

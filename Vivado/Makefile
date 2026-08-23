@@ -116,7 +116,7 @@ $(VIV_XSA): $(VIV_XPR)
 	$(VIVADO) -mode batch -notrace -source $(VIV_SCRIPT_XSA) -log $(VIV_XSA_LOG) -journal $(VIV_XSA_JOU) -tclargs $(TARGET) $(JOBS) $(SYNTH_ONLY)
 
 # Ignore two critical warnings that are benign AND present in the working deliverable
-# (scu200_hdmitx_mipi1_2lane): Place 30-894 = SCU200 ES1 DDR-clock delay-matching in the
+# (scu200_ai_demo01): Place 30-894 = SCU200 ES1 DDR-clock delay-matching in the
 # tight X0Y3 region (timing still MET), and Vivado 12-1790 = HDMI eval-license notice.
 # Any OTHER critical warning still fails the build.
 check_warnings:

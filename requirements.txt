@@ -1,0 +1,20 @@
+# Python dependencies for the SCU200 AI demo host-side tooling + model retraining.
+#
+# Create the repo-local venv and install everything:
+#   python3 -m venv venv
+#   venv/bin/pip install --upgrade pip
+#   venv/bin/pip install -r requirements.txt
+#
+# Tiers:
+#   - Host tools only (tools/png_to_rgb888.py needs pillow; tools/roi_export.py needs numpy):
+#       venv/bin/pip install pillow numpy
+#   - Retraining too (Vivado/ip/mbdpu01/train_mnist*.py): the full list below.
+#
+# PyTorch is CPU-only (no CUDA) — pulled from the PyTorch CPU wheel index; numpy/pillow
+# resolve from PyPI via the extra index. Versions pinned to the known-good set.
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
+numpy==2.5.2
+pillow==12.3.0

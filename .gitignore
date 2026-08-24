@@ -37,6 +37,10 @@
 /bootimages/
 /.*.lock
 
+# ---- Python venv (recreate: python3 -m venv venv && venv/bin/pip install -r requirements.txt) ----
+/venv/
+/.venv/
+
 # ---- generic ----
 *.pyc
 __pycache__/

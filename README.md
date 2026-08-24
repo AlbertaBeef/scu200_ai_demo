@@ -31,6 +31,17 @@ ROIs can be recorded to retrain the classifier.
   `enable_beta_device xcsu200*`.
 - `make`, and network access on the first IP build if the board store needs refreshing (not
   required for SCU200 — the part is hard-coded).
+- **Python environment** for the host tools (`tools/`) and model retraining
+  (`Vivado/ip/mbdpu01/train_mnist*.py`). Create a repo-local venv (gitignored):
+  ```bash
+  python3 -m venv venv                       # base Python 3.12
+  venv/bin/pip install --upgrade pip
+  venv/bin/pip install -r requirements.txt    # CPU-only torch/torchvision + numpy + pillow
+  ```
+  Then run the tools with `venv/bin/python3 …` (or `source venv/bin/activate` first). If you only
+  need the host tools, `venv/bin/pip install pillow numpy` is enough — `png_to_rgb888.py` needs
+  just Pillow; `torch`/`torchvision` are only for retraining. See `requirements.txt` for the
+  pinned, known-good versions.
 
 ---
 
@@ -43,6 +54,7 @@ scu200_ai_demo/
 ├── LICENSE                        MIT
 ├── .gitignore
 ├── Makefile                       top-level orchestration: `make bootimage` → Vitis app + boot zip
+├── requirements.txt               Python deps for tools/ + retraining (CPU torch, numpy, pillow)
 ├── train/                         all training material
 │   ├── captures/                  labeled ROI datasets (core-agnostic, shared across cores)
 │   │   ├── mnist_take01/          session 1 (centered framing)

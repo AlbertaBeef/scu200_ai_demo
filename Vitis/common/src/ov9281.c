@@ -65,11 +65,11 @@ static const ov9281_reg_t ov9281_mode_640x480[] = {
  * ext_vs-only free-runs, so the SW gate remains the working path for now.
  *   0x3030 b[2] r_fsin_wake_up_en=1 (snapshot), 0x3823 b[5] ext_vs_en + b[4] r_init_man,
  *   0x303F=1 frames, 0x0100=0x00 standby. */
-static const ov9281_reg_t ov9281_trigger_on[] = {   /* TEST: pure snapshot, ext_vs off, 0x303F=0 */
+static const ov9281_reg_t ov9281_trigger_on[] = {   /* known-working: snapshot wake + ext_vs */
     {0x3006,0x00},
-    {0x4f00,0x01},{0x303f,0x00},{0x302c,0x00},{0x302f,0x7f},   /* r_frame_on_num = 0 */
+    {0x4f00,0x01},{0x303f,0x01},{0x302c,0x00},{0x302f,0x7f},   /* r_frame_on_num = 1 */
     {0x3030,0x04},                                            /* wake on (snapshot, gated) */
-    {0x3823,0x10},                                            /* ext_vs OFF (r_init_man only) */
+    {0x3823,0x30},                                            /* ext_vs_en + r_init_man */
     {0x0100,0x00},                                            /* standby */
 };
 /* Undo: disable frame-sync, restore the streaming clock reg, resume continuous readout. */

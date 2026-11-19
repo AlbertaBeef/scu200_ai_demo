@@ -1768,8 +1768,8 @@ int main() {
 			 * per pulse. Drop frames dimmer than half the last good one — skip display + ROI +
 			 * inference so neither the camera layer nor the ROI flashes; the display holds the
 			 * last good frame. In free-run (g_trig_active=0) nothing is gated. */
-			int frame_dim = 0;  /* TEST: gate DISABLED to see the raw 0x303F=0 sensor feed */
-			(void)mean;
+			int frame_dim = (g_trig_active && g_last_good_bright != 0u &&
+			                 mean < (g_last_good_bright >> 1)) ? 1 : 0;
 			if (!frame_dim) {
 			g_last_good_bright = mean;
 			if (g_trig_active && g_cam_frmbuf) {   /* worker drives display: show this good frame */

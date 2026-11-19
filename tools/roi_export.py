@@ -45,9 +45,12 @@ def parse(path):
         seq  = u32(data, base+4);  pos = u32(data, base+8);  rev = u32(data, base+12)
         nfir = u32(data, base+16); pred= u32(data, base+20);  mean= u32(data, base+24)
         logits = struct.unpack_from('<10i', data, base+32)
+        # +28: mbdpu02 dx/dy (int16 x100 each; 0 on mbdpu01 galleries)
+        dx100, dy100 = struct.unpack_from('<2h', data, base+28)
         img28  = np.frombuffer(data, np.int8,  imgb,  base+smphdr).reshape(imgdim, imgdim)
         crop   = np.frombuffer(data, np.uint8, cropb, base+smphdr+imgb).reshape(cropdim, cropdim)
         samples.append(dict(seq=seq, pos=pos, rev=rev, nfir=nfir, pred=pred, mean=mean,
+                            dx=dx100 / 100.0, dy=dy100 / 100.0,
                             logits=logits, img28=img28, crop=crop))
     return samples
 
@@ -117,7 +120,7 @@ def main():
     os.makedirs(os.path.join(a.out, 'crop'), exist_ok=True)
     os.makedirs(os.path.join(a.out, 'img28'), exist_ok=True)
     with open(os.path.join(a.out, 'manifest.csv'), 'w', newline='') as f:
-        w = csv.writer(f); w.writerow(['seq','pos','rev','slot','label','pred','mean'])
+        w = csv.writer(f); w.writerow(['seq','pos','rev','slot','label','pred','mean','dx','dy'])
         for x in s:
             lab = x.get('label', '')
             sub = str(lab) if dmap else ('slot%d' % x['slot'])
@@ -126,7 +129,8 @@ def main():
             # 28x28 model input is 0..127 -> scale to 0..255 for viewing
             save_png((np.clip(x['img28'].astype(np.int16), 0, 127) * 2).astype(np.uint8),
                      os.path.join(a.out, 'img28', sub, 'i_%05d.png' % x['seq']))
-            w.writerow([x['seq'], x['pos'], x['rev'], x['slot'], lab, x['pred'], x['mean']])
+            w.writerow([x['seq'], x['pos'], x['rev'], x['slot'], lab, x['pred'], x['mean'],
+                        '%.2f' % x['dx'], '%.2f' % x['dy']])
 
     print("wrote %d samples -> %s/{crop,img28}/ + manifest.csv" % (len(s), a.out))
     if dmap:

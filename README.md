@@ -235,6 +235,31 @@ back to the correct slot instead of landing in slot 0) and writes `captures_28x2
 
 ---
 
+## `scu200_ai_demo02` — digit-position head + auto-target
+
+`scu200_ai_demo02` is demo01 with the `mbdpu02` core in place of `mbdpu01`: the same CNN plus a
+two-output head that regresses the digit's position in the ROI (**dx**, **dy** in model pixels).
+dx can steer the strobe `target` automatically (`A` key); both are shown as gauges around the
+ROI preview. See `train/mbdpu02/README.md` for the model and `CONSOLE_KEYS.md` for the keys.
+demo01 is untouched and still builds with its own target.
+
+```bash
+# 1. (optional) retrain the CNN + position head -> train/mbdpu02/
+venv/bin/python3 Vivado/ip/mbdpu02/train_mnist_pos.py --data data --out train/mbdpu02 \
+    --real train/captures/mnist_take0{1,2,3}/captures_112x112.npz
+# 2. hardware (builds mbdpu02 HLS IP incl. C-sim, then the bitstream). In a checkout whose IP
+#    was built before mbdpu02 existed, rebuild the IP first: make -C Vivado/ip ip TARGET=scu200_ai_demo02
+cd Vivado && make xsa TARGET=scu200_ai_demo02 JOBS=8 && cd ..
+# 3. software + boot image
+make bootimage TARGET=scu200_ai_demo02 JOBS=8
+# 4. background blob (once) + program
+venv/bin/python3 tools/png_to_rgb888.py --png assets/scu200_ai_demo02_background.png \
+    --out assets/scu200_ai_demo02_background_rgb.bin
+xsct scripts/program.tcl scu200_ai_demo02
+```
+All JTAG scripts take the target as an optional argument (default `scu200_ai_demo01`), e.g.
+`xsct scripts/reload_elf.tcl scu200_ai_demo02`, `xsct scripts/reload_weights.tcl scu200_ai_demo02`.
+
 ## Known issues
 
 - **Triggered-capture drift (motor encoder).** The angle strobe is driven by the motor's

@@ -16,11 +16,12 @@ JOBS ?= 8
 
 # valid targets
 # UPDATER START
-BD_NAME = scu200_ai_demo01
+BD_NAME = $(TARGET)
 APP_NAME = test_app
 COMBINE_BIT_ELF = false
 scu200_target := microblaze
 scu200_ai_demo01_target := microblaze
+scu200_ai_demo02_target := microblaze
 # UPDATER END
 
 TARGET_LIST := $(sort $(patsubst %_target,%,$(filter %_target,$(.VARIABLES))))

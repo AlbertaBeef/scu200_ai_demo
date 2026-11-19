@@ -41,6 +41,8 @@ dict set target_dict scu200 { xilinx.com scu200 { 0 2 } scu200 0 }
 # single camera on MIPI1 (index 0). board_name stays scu200 (part/IP/board handling); the
 # bd_script field selects src/bd/bd_scu200_ai_demo01.tcl + constraints scu200_ai_demo01.xdc.
 dict set target_dict scu200_ai_demo01 { xilinx.com scu200 { 0 } scu200_ai_demo01 0 }
+# scu200_ai_demo02: demo01 with mbdpu02 (MNIST CNN + dx/dy position head) in place of mbdpu01.
+dict set target_dict scu200_ai_demo02 { xilinx.com scu200 { 0 } scu200_ai_demo02 0 }
 # UPDATER END
 
 # Function to display the options and get user input
@@ -109,7 +111,8 @@ if { [info exists target] } {
 puts "Target design: $target"
 
 set design_name ${target}
-set block_name scu200_ai_demo01
+# Block-design name = the target's bd_script field (scu200_ai_demo01 / scu200_ai_demo02).
+set block_name [lindex [dict get $target_dict $target] 3]
 set board_url [lindex [dict get $target_dict $target] 0]
 set board_name [lindex [dict get $target_dict $target] 1]
 # Append Avnet bdf to the board repo paths (needed for Auboard)

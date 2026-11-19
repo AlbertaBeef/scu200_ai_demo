@@ -135,6 +135,7 @@ static const uint8_t GLYPH_SP[7] = {0,0,0,0,0,0,0};
 static const uint8_t GLYPH_DOT[7]= {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C};
 static const uint8_t GLYPH_SLH[7]= {0x01,0x02,0x04,0x04,0x08,0x10,0x10};
 static const uint8_t GLYPH_DSH[7]= {0x00,0x00,0x00,0x1F,0x00,0x00,0x00};
+static const uint8_t GLYPH_PLS[7]= {0x00,0x04,0x04,0x1F,0x04,0x04,0x00};
 static const uint8_t GLYPH_A[7]  = {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11};
 static const uint8_t GLYPH_B[7]  = {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E};
 static const uint8_t GLYPH_C[7]  = {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E};
@@ -161,7 +162,7 @@ static const uint8_t *osd_glyph_rows(char c)
     if (c >= '0' && c <= '9') return FONT5x7[c - '0'];
     switch (c) {
     case ' ': return GLYPH_SP;  case '.': return GLYPH_DOT; case '/': return GLYPH_SLH;
-    case '-': return GLYPH_DSH; case 'A': return GLYPH_A;   case 'B': return GLYPH_B;
+    case '-': return GLYPH_DSH; case '+': return GLYPH_PLS; case 'A': return GLYPH_A;   case 'B': return GLYPH_B;
     case 'C': return GLYPH_C;   case 'D': return GLYPH_D;   case 'E': return GLYPH_E;
     case 'F': return GLYPH_F;   case 'G': return GLYPH_G;   case 'I': return GLYPH_I;
     case 'L': return GLYPH_L;   case 'M': return GLYPH_M;   case 'N': return GLYPH_N;
@@ -258,6 +259,126 @@ void mnist_stats_panel(uintptr_t fb, uint32_t stride, int x0, int y0, const mnis
     #undef STAT_ROW
 
     Xil_DCacheFlushRange(fb + (uintptr_t)y0*stride, (uintptr_t)H*stride);
+}
+
+#define GAUGE_H   58            /* gauge box height: label row + track/marker */
+
+/* Shared gauge: label left, value text right-aligned, then a track spanning [mn, mx] with a
+ * teal fill from the reference point to the value and a teal marker at the value. With
+ * show_ref the reference is `ref` and gets a white tick (deviation-from-default view);
+ * without it the fill runs from mn (plain level view). */
+static void gauge_draw(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
+                       const char *label, const char *valtxt,
+                       uint32_t val, uint32_t mn, uint32_t mx, uint32_t ref, int show_ref)
+{
+    const uint32_t BLACK = 0x000000u, WHITE = 0xF0F4F8u, TEAL = 0x22E6E6u, TRACK = 0x303840u;
+    enum { S = 3, TRK_H = 8, MK_W = 6, MK_H = 22 };
+    const int TRK_Y = y0 + 34;
+
+    if (val < mn) val = mn;
+    if (val > mx) val = mx;
+    if (!show_ref) ref = mn;
+    const uint32_t span = (mx > mn) ? mx - mn : 1u;   /* mx == mn: marker pinned at the left */
+    int xv = (int)(((uint64_t)(val - mn) * (uint32_t)(w - 1) + span/2) / span);
+    int xr = (int)(((uint64_t)(ref - mn) * (uint32_t)(w - 1) + span/2) / span);
+
+    osd_fill(fb, stride, x0 - 4, y0, w + 8, GAUGE_H, BLACK);   /* clear box */
+
+    osd_text(fb, stride, x0, y0, S, label, WHITE, BLACK);
+    osd_text(fb, stride, x0 + w - osd_textw(valtxt, S), y0, S, valtxt, TEAL, BLACK);
+
+    osd_fill(fb, stride, x0, TRK_Y, w, TRK_H, TRACK);
+    int a = xv < xr ? xv : xr, b = xv < xr ? xr : xv;
+    osd_fill(fb, stride, x0 + a, TRK_Y, b - a + 1, TRK_H, TEAL);
+    if (show_ref) osd_fill(fb, stride, x0 + xr - 1, TRK_Y - 6, 2, TRK_H + 12, WHITE);
+    int mk = x0 + xv - MK_W/2;
+    if (mk < x0 - 3) mk = x0 - 3;
+    if (mk > x0 + w + 3 - MK_W) mk = x0 + w + 3 - MK_W;
+    osd_fill(fb, stride, mk, TRK_Y + TRK_H/2 - MK_H/2, MK_W, MK_H, TEAL);
+
+    Xil_DCacheFlushRange(fb + (uintptr_t)y0*stride, (uintptr_t)GAUGE_H*stride);
+}
+
+void mnist_cpr_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
+                     uint32_t cpr_q16, uint32_t min_q16, uint32_t max_q16, uint32_t def_q16)
+{
+    char v[16];
+    osd_fx10(v, (int)(((uint64_t)cpr_q16 * 10u + 32768u) >> 16));   /* rounded to 0.1 */
+    gauge_draw(fb, stride, x0, y0, w, "CPR", v, cpr_q16, min_q16, max_q16, def_q16, 1);
+}
+
+void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
+                        uint32_t target, uint32_t target_max, int auto_on)
+{
+    char v[24];                                       /* white tick = mid-point (boot default) */
+    int n = osd_u2s(v, (int)target);                  /* "value/max" — max moves with N and cpr */
+    v[n++] = '/';
+    osd_u2s(v + n, (int)target_max);
+    gauge_draw(fb, stride, x0, y0, w, auto_on ? "AUTO" : "TGT", v, target, 0u, target_max,
+               target_max / 2u, 1);
+}
+
+/* ---- dx/dy digit-position gauges framing the ROI preview (mbdpu02) ----------------------
+ * The preview is the 28x28 model input at 4 screen px per model px, so a +-14 px gauge span
+ * equals the preview's own extent: each marker sits exactly where the digit centre is drawn.
+ *   DX: horizontal, under the preview      (x ROI_X..+112, y POS_DX_Y)       left -, right +
+ *   DY: vertical, left of the preview      (x POS_DY_X, y ROI_Y..+112)       top +, bottom -
+ * Values print below the DX gauge ("DX +1.2" / "DY -0.4", scale 2). Whole box repainted and
+ * cache-flushed every call (drawn into the back buffer each capture, like the bars). */
+#define POS_SPAN   (MNIST_DIM*ROI_S)        /* 112 screen px = 28 model px */
+#define POS_PPX    ROI_S                    /* 4 screen px per model px */
+#define POS_DX_Y   (ROI_Y + POS_SPAN + 8)   /* DX track top (8 px under the preview) */
+#define POS_DY_X   (ROI_X - 16)             /* DY track left (8 px left of the preview) */
+#define POS_TRK    6                        /* track thickness */
+#define POS_MK_L   16                       /* marker length across the track */
+#define POS_MK_W   4                        /* marker width along the track */
+#define POS_TXT_Y  (POS_DX_Y + 18)          /* first value line */
+#define POS_BOX_X0 (POS_DY_X - 6)
+#define POS_BOX_Y1 (POS_TXT_Y + 2*18)       /* two text lines of 14 px + gap */
+
+static void pos_fmt(char *buf, int v_x100)   /* "+1.2" / "-0.4", rounded to 0.1 */
+{
+    int neg = v_x100 < 0, a = neg ? -v_x100 : v_x100;
+    int x10 = (a + 5) / 10;
+    buf[0] = (x10 == 0) ? ' ' : (neg ? '-' : '+');
+    osd_fx10(buf + 1, x10);
+}
+
+void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100)
+{
+    const uint32_t BLACK = 0x000000u, WHITE = 0xF0F4F8u, TEAL = 0x22E6E6u, TRACK = 0x303840u;
+    const int half = POS_SPAN / 2, lim = half * 100 / POS_PPX;     /* +-14.00 px */
+    int dx = dx_x100 > lim ? lim : (dx_x100 < -lim ? -lim : dx_x100);
+    int dy = dy_x100 > lim ? lim : (dy_x100 < -lim ? -lim : dy_x100);
+    int ox = (dx * POS_PPX) / 100, oy = (dy * POS_PPX) / 100;      /* screen px from centre */
+    char v[12];
+
+    /* clear: the strip under the preview (DX + text) and the column left of it (DY) */
+    osd_fill(fb, stride, POS_BOX_X0, POS_DX_Y - 6, ROI_X + POS_SPAN + 4 - POS_BOX_X0,
+             POS_BOX_Y1 - (POS_DX_Y - 6), BLACK);
+    osd_fill(fb, stride, POS_BOX_X0, ROI_Y - 4, ROI_X - 2 - POS_BOX_X0, POS_SPAN + 8, BLACK);
+
+    /* DX: track, fill centre->value, centre tick, marker */
+    const int cx = ROI_X + half, ty = POS_DX_Y;
+    osd_fill(fb, stride, ROI_X, ty, POS_SPAN, POS_TRK, TRACK);
+    if (ox) osd_fill(fb, stride, ox < 0 ? cx + ox : cx, ty, ox < 0 ? -ox : ox, POS_TRK, TEAL);
+    osd_fill(fb, stride, cx - 1, ty - 4, 2, POS_TRK + 8, WHITE);
+    osd_fill(fb, stride, cx + ox - POS_MK_W/2, ty + POS_TRK/2 - POS_MK_L/2, POS_MK_W, POS_MK_L, TEAL);
+
+    /* DY: track, fill centre->value (up = +), centre tick, marker */
+    const int cy = ROI_Y + half, tx = POS_DY_X;
+    osd_fill(fb, stride, tx, ROI_Y, POS_TRK, POS_SPAN, TRACK);
+    if (oy) osd_fill(fb, stride, tx, oy > 0 ? cy - oy : cy, POS_TRK, oy > 0 ? oy : -oy, TEAL);
+    osd_fill(fb, stride, tx - 4, cy - 1, POS_TRK + 8, 2, WHITE);
+    osd_fill(fb, stride, tx + POS_TRK/2 - POS_MK_L/2, cy - oy - POS_MK_W/2, POS_MK_L, POS_MK_W, TEAL);
+
+    /* values */
+    osd_text(fb, stride, ROI_X, POS_TXT_Y, 2, "DX", WHITE, BLACK);
+    pos_fmt(v, dx_x100); osd_text(fb, stride, ROI_X + POS_SPAN - osd_textw(v, 2), POS_TXT_Y, 2, v, TEAL, BLACK);
+    osd_text(fb, stride, ROI_X, POS_TXT_Y + 18, 2, "DY", WHITE, BLACK);
+    pos_fmt(v, dy_x100); osd_text(fb, stride, ROI_X + POS_SPAN - osd_textw(v, 2), POS_TXT_Y + 18, 2, v, TEAL, BLACK);
+
+    Xil_DCacheFlushRange(fb + (uintptr_t)(ROI_Y - 4)*stride, (uintptr_t)(POS_BOX_Y1 - (ROI_Y - 4))*stride);
 }
 
 // Capture the crop region resampled to 112x112 grayscale (nearest-neighbour) for training data.

@@ -36,6 +36,11 @@ void disc_strobe_set_cam_cb(disc_strobe_cam_cb_t cb) { g_cam_cb = cb; }
 static inline void wr(uint32_t off, uint32_t v) { Xil_Out32(DISC_STROBE_BASE + off, v); }
 static inline uint32_t rd(uint32_t off)         { return Xil_In32(DISC_STROBE_BASE + off); }
 
+/* Largest useful target: the first fire point must lie strictly inside the first step (target <
+ * cpr/N), else the last of the N points lands past cpr and is never reached (fewer than N
+ * captures/rev; target >= cpr fires none). Any larger offset just repeats a reachable grid. */
+static uint32_t target_max(void) { return g_step_q16 ? (g_step_q16 - 1u) >> 16 : 0u; }
+
 /* fire_step = cpr / captures, kept in Q16 (the divide lives here so the fabric stays add-only).
  * Recomputed whenever cpr or the capture count changes, so a cpr trim rescales the whole
  * N-point grid together. Clamp: N >= 1, step >= 1. */
@@ -46,18 +51,25 @@ static void recompute_step(void)
     if (g_step_q16 == 0) g_step_q16 = 1u;
     wr(R_FIRE_STEP, g_step_q16);
     wr(R_NUM_FIRES, n);          // core fires EXACTLY n pulses/rev (no tight pair near wrap)
+    if (g_target > target_max()) {           // step shrank (N up / cpr down): re-clamp target
+        g_target = target_max();
+        wr(R_TARGET, g_target * DISC_STROBE_Q16);
+    }
 }
 
 /* cpr fine-trim in Q16 (used by the C/V keys for live drift-null). */
 static void set_cpr_q16(uint32_t cpr_q16)
 {
-    g_cpr_q16 = cpr_q16 ? cpr_q16 : 1u;
+    if (cpr_q16 < DISC_STROBE_CPR_Q16_MIN) cpr_q16 = DISC_STROBE_CPR_Q16_MIN;
+    if (cpr_q16 > DISC_STROBE_CPR_Q16_MAX) cpr_q16 = DISC_STROBE_CPR_Q16_MAX;
+    g_cpr_q16 = cpr_q16;
     wr(R_CPR, g_cpr_q16);
     recompute_step();
 }
 
 void disc_strobe_set_cpr(uint32_t cpr)      { set_cpr_q16(cpr * DISC_STROBE_Q16); }   /* whole counts */
-void disc_strobe_set_target(uint32_t angle) { g_target = angle; wr(R_TARGET, g_target * DISC_STROBE_Q16); }
+void disc_strobe_set_target(uint32_t angle) { uint32_t m = target_max(); g_target = angle > m ? m : angle;
+                                              wr(R_TARGET, g_target * DISC_STROBE_Q16); }
 void disc_strobe_set_pulse(uint32_t clks)   { g_pulse = clks;   wr(R_PULSE, g_pulse); }
 void disc_strobe_enable(int on)             { g_en = on ? 1u : 0u; wr(R_ENABLE, g_en); }
 void disc_strobe_set_captures(uint32_t n)   { g_ncap = n ? n : 1u;  recompute_step(); }
@@ -65,22 +77,27 @@ void disc_strobe_set_captures(uint32_t n)   { g_ncap = n ? n : 1u;  recompute_st
 uint32_t disc_strobe_position(void) { return rd(R_POSITION); }
 uint32_t disc_strobe_revs(void)     { return rd(R_REV_COUNT); }
 uint32_t disc_strobe_cpr(void)      { return g_cpr_q16 >> 16; }   /* integer counts for fine-count RPM */
-uint32_t disc_strobe_cpr_x10(void)  { return (uint32_t)(((uint64_t)g_cpr_q16 * 10u) >> 16); }
+uint32_t disc_strobe_cpr_x10(void)  { return (uint32_t)(((uint64_t)g_cpr_q16 * 10u + 32768u) >> 16); }
+uint32_t disc_strobe_cpr_q16(void)  { return g_cpr_q16; }
 uint32_t disc_strobe_target(void)   { return g_target; }
+uint32_t disc_strobe_target_max(void) { return target_max(); }
 uint32_t disc_strobe_captures(void) { return g_ncap; }
 int      disc_strobe_enabled(void)  { return (int)g_en; }
 
 /* cpr as whole.hundredths for prints. */
 #define CPR_WHOLE  (g_cpr_q16 >> 16)
 #define CPR_FRAC2  (((g_cpr_q16 & 0xFFFFu) * 100u) >> 16)
+#define CPR_LIMIT  (g_cpr_q16 == DISC_STROBE_CPR_Q16_MIN ? " (min)" : \
+                    g_cpr_q16 == DISC_STROBE_CPR_Q16_MAX ? " (max)" : "")
 
 void disc_strobe_init(void)
 {
     g_ncap = 8;
     wr(R_CPR,    g_cpr_q16);
-    wr(R_TARGET, g_target * DISC_STROBE_Q16);
     wr(R_PULSE,  g_pulse);
     recompute_step();          // fire_step = cpr / 8 -> 8 captures per rev (default)
+    g_target = target_max() / 2u;            // default target: mid-point of its 0..cpr/N range
+    wr(R_TARGET, g_target * DISC_STROBE_Q16);
     wr(R_ENABLE, 0);           // start with the strobe OFF (OV9281 free-runs until armed)
     g_en = 0;
     xil_printf("strobe: init cpr=%lu.%02lu target=%lu pulse=%lu clk captures=%lu (OFF, 4x/Q16)\r\n",
@@ -108,21 +125,24 @@ int disc_strobe_poll_key(int ch)
               xil_printf("strobe: %s\r\n", g_en ? "ARMED" : "off"); return 1;
     case 'N': { uint32_t n = g_ncap << 1; if (n > 16u) n = 1u;   /* 1->2->4->8->16->1 */
                 disc_strobe_set_captures(n);
-                xil_printf("strobe: captures=%lu/rev  step=%lu.%02lu counts\r\n",
+                xil_printf("strobe: captures=%lu/rev  step=%lu.%02lu counts  target=%lu (max %lu)\r\n",
                            (unsigned long)g_ncap, (unsigned long)(g_step_q16>>16),
-                           (unsigned long)(((g_step_q16 & 0xFFFFu)*100u)>>16)); } return 1;
+                           (unsigned long)(((g_step_q16 & 0xFFFFu)*100u)>>16),
+                           (unsigned long)g_target, (unsigned long)target_max()); } return 1;
     case 'F': if (g_cam_cb) { g_cam_on = !g_cam_on; g_cam_cb(g_cam_on);
                   xil_printf("strobe: camera FSIN trigger %s\r\n", g_cam_on ? "ON" : "OFF"); }
               else xil_printf("strobe: no camera trigger hook registered\r\n");
               return 1;
-    case 'T': disc_strobe_set_target(g_target + 5);
-              xil_printf("strobe: target=%lu\r\n", (unsigned long)g_target); return 1;
+    case 'T': disc_strobe_set_target(g_target + 5);            /* clamped to target_max() */
+              xil_printf("strobe: target=%lu%s\r\n", (unsigned long)g_target,
+                         g_target == target_max() ? " (max)" : ""); return 1;
     case 'G': disc_strobe_set_target(g_target >= 5 ? g_target - 5 : 0);
-              xil_printf("strobe: target=%lu\r\n", (unsigned long)g_target); return 1;
-    case 'C': set_cpr_q16(g_cpr_q16 + CPR_TRIM_Q16);            /* +0.1 count (drift-null) */
-              xil_printf("strobe: cpr=%lu.%02lu\r\n", (unsigned long)CPR_WHOLE, (unsigned long)CPR_FRAC2); return 1;
-    case 'V': set_cpr_q16(g_cpr_q16 > CPR_TRIM_Q16 ? g_cpr_q16 - CPR_TRIM_Q16 : 1u);  /* -0.1 count */
-              xil_printf("strobe: cpr=%lu.%02lu\r\n", (unsigned long)CPR_WHOLE, (unsigned long)CPR_FRAC2); return 1;
+              xil_printf("strobe: target=%lu%s\r\n", (unsigned long)g_target,
+                         g_target == 0u ? " (min)" : ""); return 1;
+    case 'C': set_cpr_q16(g_cpr_q16 + CPR_TRIM_Q16);            /* +0.1 count (drift-null), clamped */
+              xil_printf("strobe: cpr=%lu.%02lu%s\r\n", (unsigned long)CPR_WHOLE, (unsigned long)CPR_FRAC2, CPR_LIMIT); return 1;
+    case 'V': set_cpr_q16(g_cpr_q16 - CPR_TRIM_Q16);            /* -0.1 count, clamped (g_cpr_q16 >= MIN > trim) */
+              xil_printf("strobe: cpr=%lu.%02lu%s\r\n", (unsigned long)CPR_WHOLE, (unsigned long)CPR_FRAC2, CPR_LIMIT); return 1;
     case 'Y': disc_strobe_status(); return 1;
     default:  return 0;
     }

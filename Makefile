@@ -18,11 +18,12 @@ JOBS ?= 8
 
 # valid targets  { template_name  both|baremetal_only }
 # UPDATER START
-BD_NAME = scu200_ai_demo01
+BD_NAME = $(TARGET)
 PRJ_NAME = scu200_ai_demo
 COMBINE_BIT_ELF = false
 scu200_target := microblaze baremetal_only
 scu200_ai_demo01_target := microblaze baremetal_only
+scu200_ai_demo02_target := microblaze baremetal_only
 # UPDATER END
 
 TARGET_LIST := $(sort $(patsubst %_target,%,$(filter %_target,$(.VARIABLES))))

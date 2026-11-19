@@ -46,4 +46,20 @@ void mbdpu01_start(uint32_t base, uint64_t wblob, uint64_t pblob, uint64_t img, 
 int  mbdpu01_infer(uint32_t base, uint64_t wblob, uint64_t pblob,
                    uint64_t img, uint64_t out, int32_t logits[10]);
 
+// --- mbdpu02 = mbdpu01 + a dx/dy digit-position head (Vivado/ip/mbdpu02/) ---------------
+// Same ports and register map (verified against xmbdpu02_hw.h), so the MBDPU01_* register
+// offsets and mbdpu01_init/idle/done/start apply unchanged. Larger blobs + output:
+#define MBDPU02_WBLOB_BYTES 10632u       // int8 weights (fc grows 10 -> 12 rows)
+#define MBDPU02_PBLOB_BYTES (42u*4u)     // int32 params (+ pos_b[2], pos_k, pos_sh)
+#define MBDPU02_OUT_N       13u          // 10 logits, [10] argmax, [11] dx acc, [12] dy acc
+#define MBDPU02_OUT_BYTES   (MBDPU02_OUT_N*4u)
+#define MBDPU02_PBLOB_POSK  40u          // pblob index: px*100 multiplier
+#define MBDPU02_PBLOB_POSH  41u          // pblob index: shift
+
+// Blocking inference on mbdpu02. As mbdpu01_infer, plus `pos_x100` (may be NULL) receives the
+// digit position in 1/100 model pixels, 0 = centred: [0] dx (left -ve, right +ve),
+// [1] dy (top +ve, bottom -ve). Converted as (acc * pblob[40]) >> pblob[41].
+int  mbdpu02_infer(uint32_t base, uint64_t wblob, uint64_t pblob,
+                   uint64_t img, uint64_t out, int32_t logits[10], int32_t pos_x100[2]);
+
 #endif // MBDPU01_H

@@ -15,10 +15,12 @@ JOBS ?= 8
 
 # valid targets
 # UPDATER START
-BD_NAME = scu200_ai_demo01
+BD_NAME = $(TARGET)
 scu200_target := xilinx.com scu200 no_accel
 # SCU200 AI demo (rotating-disc MNIST). board_name stays scu200.
 scu200_ai_demo01_target := xilinx.com scu200 no_accel
+# demo01 + mbdpu02 (CNN with dx/dy digit-position head).
+scu200_ai_demo02_target := xilinx.com scu200 no_accel
 # UPDATER END
 
 TARGET_LIST := $(sort $(patsubst %_target,%,$(filter %_target,$(.VARIABLES))))

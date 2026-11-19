@@ -61,7 +61,7 @@ if { $argc == 3 } {
 }
 
 set design_name ${target}
-set block_name scu200_ai_demo01
+set block_name ${target}   ;# block design is named after the target (see build.tcl)
 
 # Set the reference directory for source file relative paths (by default the value is script directory path)
 set origin_dir "."

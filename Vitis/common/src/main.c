@@ -234,6 +234,10 @@ static uintptr_t g_bg_back  = BG_IMG_BUF_B;
 #define STAT_PANEL_Y 515
 #define STAT_PANEL_W 230      /* must match mnist_stats_panel() W/H */
 #define STAT_PANEL_H 320
+#define CPR_GAUGE_X  STAT_PANEL_X                     /* cpr gauge: directly under the 'h' panel, */
+#define CPR_GAUGE_Y  (STAT_PANEL_Y + STAT_PANEL_H + 10)  /* same width; camera window ends y=980 */
+#define CPR_GAUGE_W  STAT_PANEL_W
+#define TGT_GAUGE_Y  (CPR_GAUGE_Y + 58 + 6)           /* target gauge under the cpr gauge (ends ~967) */
 static int g_hud_on = 0;      /* 'h' toggles the stats panel + ROI box together; default OFF */
 static int g_verbose = 1;     /* 'v' toggles a 1/sec one-line console dump of the panel; default ON */
 static void hud_clear_panel(void);  /* fwd decl: used by the 'h' key handler above its definition */
@@ -289,6 +293,23 @@ static uint32_t g_frm_min = 255, g_frm_max = 0;   /* TEST probe: brightness rang
  * Written to the mbpre AXI-Lite regs each capture. Live pan/zoom over UART (see keys below).
  * Guarded by the XPAR macro (MBPRE_BASE itself is #defined inside main()). Default = centred
  * 112 crop (shift 2), matching the previous MNIST_CROP. */
+/* --- mbdpu02 digit-position head (scu200_ai_demo02) -----------------------------------
+ * mbdpu02 = mbdpu01 + a dx/dy head. Per capture: dx/dy (1/100 model px) drive the gauges
+ * around the ROI preview; with auto-target ('A') the mean dx over one revolution nudges the
+ * strobe target. Sign: on the rig the digits sweep right->left in the image (take02: later
+ * strobes -> smaller ink-x), so a digit right of centre (dx>0) means the strobe fired early
+ * -> raise target. Flip DX_TARGET_SIGN if the loop runs away (e.g. motor reversed with 'r'). */
+#if defined(XPAR_MBDPU02_S_AXI_CONTROL_BASEADDR) || defined(XPAR_MBDPU02_BASEADDR)
+#define MBDPU_HAS_POS 1
+#define DX_TARGET_SIGN      (+1)
+#define AUTO_DEADBAND_X100  50    /* |mean dx| <= 0.5 px: leave target alone */
+#define AUTO_STEP_MAX       5     /* counts per revolution (~1.3 px at ~0.26 px/count) */
+static int32_t  g_pos_x100[2] = {0, 0};   /* latest dx, dy */
+static int      g_auto_tgt = 0;           /* 'A': dx -> target loop on/off (default off) */
+static int32_t  g_auto_sum = 0;           /* sum of dx over the current revolution */
+static uint32_t g_auto_n   = 0;           /* captures summed */
+#endif
+
 #if defined(XPAR_MBPRE_S_AXI_CONTROL_BASEADDR) || defined(XPAR_MBPRE_BASEADDR)
 #define MBPRE_CROP_CTRL 1
 static uint32_t g_crop_shift = 2;                          /* 28<<2 = 112 */
@@ -318,6 +339,11 @@ static int mnist_crop_key(int ch)
     case 'i': g_crop_y0 = (g_crop_y0 > step) ? g_crop_y0 - step : 0; break;
     case 'k': { uint32_t my = MNIST_FRAME_H - crop; g_crop_y0 = (g_crop_y0 + step < my) ? g_crop_y0 + step : my; } break;
     case 'o': mnist_crop_recenter(); break;
+#ifdef MBDPU_HAS_POS
+    case 'A': g_auto_tgt = !g_auto_tgt; g_auto_sum = 0; g_auto_n = 0;
+              xil_printf("auto-target: %s (dx -> target, once per rev; needs S armed + F on)\r\n",
+                         g_auto_tgt ? "ON" : "off"); return 1;
+#endif
 #ifdef STATS_ENABLE
     case 'h': g_hud_on = !g_hud_on;                 /* toggle stats panel + ROI box together */
               if (!g_hud_on) hud_clear_panel();     /* black out the panel (ROI box clears on next frame) */
@@ -339,6 +365,9 @@ static int mnist_crop_key(int ch)
         xil_printf("Camera:  ]/[ gain +-0.5x | ./, exposure +-256\r\n");
         xil_printf("Overlay: h HUD+ROI on/off | v verbose console on/off | ? this help\r\n");
         xil_printf("Capture: w record ROI training data on/off (fills DDR gallery for JTAG dump)\r\n");
+#ifdef MBDPU_HAS_POS
+        xil_printf("Position: A auto-target on/off (CNN dx steers the strobe target; DX/DY gauges on HDMI)\r\n");
+#endif
         return 1;
     case ']': g_gain += 8; if (g_gain > 0x3F0) g_gain = 0x3F0;   /* gain up (~0.5x/step, cap ~63x) */
               if (g_ov9281_present) ov9281_set_gain(g_ov9281_iic, g_gain);
@@ -530,6 +559,30 @@ static inline void rt_arm(void)
  * register reads until a window actually elapses. */
 static void stats_service(void)
 {
+	/* cpr + target gauges under the 'h' stats panel: always shown, repainted only on change. */
+	{ static uint32_t last_q16 = 0u;
+	  uint32_t q = disc_strobe_cpr_q16();
+	  if (q != last_q16) {
+		last_q16 = q;
+		mnist_cpr_gauge(BG_IMG_BUF,   (u32)(VMODE_WIDTH*3u), CPR_GAUGE_X, CPR_GAUGE_Y, CPR_GAUGE_W,
+		                q, DISC_STROBE_CPR_Q16_MIN, DISC_STROBE_CPR_Q16_MAX, DISC_STROBE_CPR_Q16_DEFAULT);
+		mnist_cpr_gauge(BG_IMG_BUF_B, (u32)(VMODE_WIDTH*3u), CPR_GAUGE_X, CPR_GAUGE_Y, CPR_GAUGE_W,
+		                q, DISC_STROBE_CPR_Q16_MIN, DISC_STROBE_CPR_Q16_MAX, DISC_STROBE_CPR_Q16_DEFAULT);
+	  } }
+	/* target gauge under it: redrawn when target or its max (cpr/N) changes. */
+	{ static uint32_t last_t = 0xFFFFFFFFu, last_tm = 0xFFFFFFFFu; static int last_a = -1;
+#ifdef MBDPU_HAS_POS
+	  int a = g_auto_tgt;
+#else
+	  int a = 0;
+#endif
+	  uint32_t t = disc_strobe_target(), tm = disc_strobe_target_max();
+	  if (t != last_t || tm != last_tm || a != last_a) {
+		last_t = t; last_tm = tm; last_a = a;
+		mnist_target_gauge(BG_IMG_BUF,   (u32)(VMODE_WIDTH*3u), CPR_GAUGE_X, TGT_GAUGE_Y, CPR_GAUGE_W, t, tm, a);
+		mnist_target_gauge(BG_IMG_BUF_B, (u32)(VMODE_WIDTH*3u), CPR_GAUGE_X, TGT_GAUGE_Y, CPR_GAUGE_W, t, tm, a);
+	  } }
+
 	uint32_t cpr  = disc_strobe_cpr(); if (cpr == 0u) cpr = 1u;
 	uint32_t fine = disc_strobe_revs() * cpr + disc_strobe_position();  /* absolute encoder count */
 
@@ -568,12 +621,19 @@ static void stats_service(void)
 		int ox = g_stat_ovl_x10  < 0 ? 0 : g_stat_ovl_x10;
 		int gx = (int)(g_gain * 10u / 16u);
 		int cpx = (int)disc_strobe_cpr_x10();
-		xil_printf("RPM=%d CAP=%d.%d PRE=%d.%d DPU=%d.%d OVL=%d.%d TRIG=%s STRB=%s EXPO=%d GAIN=%d.%d TGT=%d CPR=%d.%d REC=%s %lu/%lu\r\n",
+		xil_printf("RPM=%d CAP=%d.%d PRE=%d.%d DPU=%d.%d OVL=%d.%d TRIG=%s STRB=%s EXPO=%d GAIN=%d.%d TGT=%d CPR=%d.%d REC=%s %lu/%lu",
 		           g_stat_rpm < 0 ? 0 : g_stat_rpm,
 		           cx/10, cx%10, px/10, px%10, dx/10, dx%10, ox/10, ox%10,
 		           g_trig_active ? "ON" : "OFF", disc_strobe_enabled() ? "ARM" : "OFF",
 		           (int)g_exposure, gx/10, gx%10, (int)disc_strobe_target(), cpx/10, cpx%10,
 		           g_recording ? "ON" : "off", (unsigned long)g_roi_count, (unsigned long)ROI_GAL_CAP);
+#ifdef MBDPU_HAS_POS
+		{ int a0 = g_pos_x100[0] < 0 ? -g_pos_x100[0] : g_pos_x100[0];
+		  int a1 = g_pos_x100[1] < 0 ? -g_pos_x100[1] : g_pos_x100[1];
+		  xil_printf(" DX=%c%d.%02d DY=%c%d.%02d AUTO=%s", g_pos_x100[0] < 0 ? '-' : '+', a0/100, a0%100,
+		             g_pos_x100[1] < 0 ? '-' : '+', a1/100, a1%100, g_auto_tgt ? "ON" : "off"); }
+#endif
+		xil_printf("\r\n");
 	}
 
 	if (!g_hud_on) return;   /* measurement keeps running; drawing is toggled off */
@@ -620,7 +680,12 @@ static void roi_record(uintptr_t cambuf, uint32_t stride, uintptr_t img_src,
 	hd[4] = disc_strobe_captures();      /* N */
 	hd[5] = (uint32_t)pred;              /* predicted digit (QC) */
 	hd[6] = mean;                        /* frame brightness (QC) */
+#ifdef MBDPU_HAS_POS
+	hd[7] = ((uint32_t)(uint16_t)(int16_t)g_pos_x100[0]) |      /* dx x100 (int16, lo) */
+	        ((uint32_t)(uint16_t)(int16_t)g_pos_x100[1] << 16);  /* dy x100 (int16, hi) */
+#else
 	hd[7] = 0u;
+#endif
 	for (int i = 0; i < 10; i++) ((volatile int32_t *)s)[8 + i] = logits[i];   /* logits at +32 */
 
 	Xil_DCacheFlushRange((UINTPTR)img_src, ROI_SMP_IMG);   /* ensure model input is coherent */
@@ -1657,7 +1722,13 @@ int main() {
     }
 #endif
 
-#if defined(XPAR_MBDPU01_S_AXI_CONTROL_BASEADDR)
+/* MBDPU01_BASE = "the DPU": mbdpu02 (demo02, same register map + a position head) when
+ * present, else mbdpu01 (demo01). */
+#if defined(XPAR_MBDPU02_S_AXI_CONTROL_BASEADDR)
+#  define MBDPU01_BASE   XPAR_MBDPU02_S_AXI_CONTROL_BASEADDR
+#elif defined(XPAR_MBDPU02_BASEADDR)
+#  define MBDPU01_BASE   XPAR_MBDPU02_BASEADDR
+#elif defined(XPAR_MBDPU01_S_AXI_CONTROL_BASEADDR)
 #  define MBDPU01_BASE   XPAR_MBDPU01_S_AXI_CONTROL_BASEADDR
 #elif defined(XPAR_MBDPU01_BASEADDR)
 #  define MBDPU01_BASE   XPAR_MBDPU01_BASEADDR   /* 2025.2 SDT flow names it this */
@@ -1666,17 +1737,22 @@ int main() {
 	/* mbdpu01 = 28x28x1 INT8 MNIST classifier sharing DDR with the display.
 	 * Weights are JTAG-loaded to DDR once at program time (weight-agnostic core),
 	 * so retraining needs no rebuild. img is (re)written each classification. */
-#  define MBDPU01_WBLOB  0xB0000000u   /* weights int8[9064]  - JTAG-loaded */
-#  define MBDPU01_PBLOB  0xB0010000u   /* params  int32[38]   - JTAG-loaded */
+#  define MBDPU01_WBLOB  0xB0000000u   /* weights int8[9064] (mbdpu02: [10632]) - JTAG-loaded */
+#  define MBDPU01_PBLOB  0xB0010000u   /* params  int32[38]  (mbdpu02: [42])    - JTAG-loaded */
 #  define MBDPU01_IMG    0xB0020000u   /* 28x28 image - written each frame by preprocess */
-#  define MBDPU01_OUT    0xB0030000u   /* result int32[11]: 10 logits + argmax */
+#  define MBDPU01_OUT    0xB0030000u   /* result int32[11] (mbdpu02: [13] + dx, dy) */
 #if defined(XPAR_MBPRE_S_AXI_CONTROL_BASEADDR)
 #  define MBPRE_BASE XPAR_MBPRE_S_AXI_CONTROL_BASEADDR
 #elif defined(XPAR_MBPRE_BASEADDR)
 #  define MBPRE_BASE XPAR_MBPRE_BASEADDR   /* preprocessing offloaded to fabric */
 #endif
+#ifdef MBDPU_HAS_POS
+	xil_printf("mbdpu02 MNIST classifier + dx/dy position head ready: ctrl 0x%08x, "
+	           "weights @0x%08x/0x%08x (inverted-model, invert=0)\n\r",
+#else
 	xil_printf("mbdpu01 MNIST classifier ready: ctrl 0x%08x, weights @0x%08x/0x%08x "
 	           "(inverted-model, invert=0)\n\r",
+#endif
 	           (unsigned)MBDPU01_BASE, (unsigned)MBDPU01_WBLOB, (unsigned)MBDPU01_PBLOB);
 #endif
 
@@ -1807,8 +1883,30 @@ int main() {
 #ifdef STATS_ENABLE
 			uint32_t _lt1 = Xil_In32(RT_BASE + RT_TCR);   /* end mbpre preprocess */
 #endif
+#ifdef MBDPU_HAS_POS
+			int pred = mbdpu02_infer(MBDPU01_BASE, MBDPU01_WBLOB, MBDPU01_PBLOB,
+			                         MBDPU01_IMG, MBDPU01_OUT, logits, g_pos_x100);
+			/* Auto-target: average dx over one revolution (N captures) so each printed digit's
+			 * own static offset averages out, then step target toward centring (1 count per
+			 * 0.5 px of mean dx, capped). Only while the strobe drives the camera. */
+			if (g_auto_tgt && g_trig_active && disc_strobe_enabled()) {
+				g_auto_sum += g_pos_x100[0];
+				if (++g_auto_n >= disc_strobe_captures()) {
+					int32_t mean_dx = g_auto_sum / (int32_t)g_auto_n;
+					g_auto_sum = 0; g_auto_n = 0;
+					if (mean_dx > AUTO_DEADBAND_X100 || mean_dx < -AUTO_DEADBAND_X100) {
+						int step = (int)(mean_dx / 50) * DX_TARGET_SIGN;
+						if (step >  AUTO_STEP_MAX) step =  AUTO_STEP_MAX;
+						if (step < -AUTO_STEP_MAX) step = -AUTO_STEP_MAX;
+						int t = (int)disc_strobe_target() + step;
+						disc_strobe_set_target(t < 0 ? 0u : (uint32_t)t);   /* clamps to max */
+					}
+				}
+			}
+#else
 			int pred = mbdpu01_infer(MBDPU01_BASE, MBDPU01_WBLOB, MBDPU01_PBLOB,
 			                         MBDPU01_IMG, MBDPU01_OUT, logits);
+#endif
 			(void)pred;
 #ifdef STATS_ENABLE
 			uint32_t _lt2 = Xil_In32(RT_BASE + RT_TCR);   /* end mbdpu01 inference */
@@ -1820,6 +1918,9 @@ int main() {
 			 * boundary (auto-restart), then we swap front/back for the next capture. */
 			mnist_draw_live(g_bg_back, (u32)(VMODE_WIDTH*3u),
 			                (const int8_t *)(uintptr_t)MBDPU01_IMG, logits);
+#ifdef MBDPU_HAS_POS
+			mnist_draw_pos(g_bg_back, (u32)(VMODE_WIDTH*3u), (int)g_pos_x100[0], (int)g_pos_x100[1]);
+#endif
 			XVFrmbufRd_SetBufferAddr(&BgFrmbufRd, g_bg_back);
 			{ uintptr_t t = g_bg_front; g_bg_front = g_bg_back; g_bg_back = t; }
 #endif

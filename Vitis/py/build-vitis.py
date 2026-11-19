@@ -414,7 +414,7 @@ def main():
     with open(args_json_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    bd_name = cfg.get("bd_name")
+    bd_name = cfg.get("bd_names", {}).get(maybe_target, cfg.get("bd_name"))   # per-target override
     if not bd_name:
         die('args.json must include "bd_name".')
 

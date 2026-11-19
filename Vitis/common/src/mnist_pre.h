@@ -54,6 +54,25 @@ typedef struct {
 // the DMA. Call it into BOTH background buffers so it survives the double-buffer page-flip.
 void mnist_stats_panel(uintptr_t fb, uint32_t stride, int x0, int y0, const mnist_stats_t *s);
 
+// cpr trim gauge, top-left (x0,y0), w px wide, 58 px tall: "CPR <value>" label + a horizontal
+// track spanning [min_q16, max_q16] with a centre tick at def_q16 and a marker at cpr_q16 (Q16
+// counts). Repaints its whole box (black bg, 4 px side margin) and cache-flushes it; call into
+// BOTH background buffers.
+void mnist_cpr_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
+                     uint32_t cpr_q16, uint32_t min_q16, uint32_t max_q16, uint32_t def_q16);
+
+// strobe target gauge (same 58 px box style): "TGT value/max" + a track 0..target_max with a
+// white tick at the mid-point (the boot default) and a teal fill from it to the marker. target_max follows cpr/N, so redraw when either changes.
+// auto_on relabels the gauge "AUTO" while the dx -> target loop (key 'A') is running.
+void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
+                        uint32_t target, uint32_t target_max, int auto_on);
+
+// mbdpu02 digit-position gauges framing the ROI preview: DX (horizontal, under it) and DY
+// (vertical, left of it), +-14 model px = the preview's own extent, plus "DX +1.2"/"DY -0.4"
+// value lines. Values in 1/100 model px (dx: left -, right +; dy: top +, bottom -). Repaints
+// its area and cache-flushes it; call on the back buffer each capture (like mnist_draw_live).
+void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100);
+
 #define ROI_CAP_DIM 112   // captured hi-res crop side (for training data)
 
 // Capture the current crop region (side x side, from the live camera frame) resampled by

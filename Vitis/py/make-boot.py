@@ -300,7 +300,7 @@ def main():
     with open(args_json, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    bd_name   = cfg.get("bd_name")
+    bd_name   = cfg.get("bd_names", {}).get(target, cfg.get("bd_name"))   # per-target override
     app_name  = cfg.get("app_name", "test_app")
     combine   = bool(cfg.get("combine_bit_elf", True))
     if not bd_name:

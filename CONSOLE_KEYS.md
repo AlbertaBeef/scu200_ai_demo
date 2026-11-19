@@ -30,13 +30,16 @@ list; this file is the annotated version.
 | `S` | arm / disarm the strobe |
 | `F` | fire an FSIN trigger |
 | `N` | captures per revolution: cycles `1 / 2 / 4 / 8 / 16` |
-| `T` / `G` | target position ± 5 |
+| `T` / `G` | target position ± 5 (clamped to `0 … cpr/N`, default mid-point; shown on the HDMI **TGT** gauge) |
 | `C` / `V` | **`cpr` ± 0.1** — the drift-null trim (see below) |
 | `Y` | strobe status |
 
 > **`cpr` trim (`C`/`V`).** The strobe angle is derived from the pre-gearbox encoder, so a small
 > residual drift remains. `cpr` (counts per disc-revolution, default **979.6**) nudges the phase
 > accumulator to null it out live. Watch the captured frames "hold still", then leave `cpr` there.
+> The trim is clamped to **959.6 – 999.6** (default ± 20, so the default sits mid-range); the console
+> appends `(min)`/`(max)` at a limit. A teal **CPR gauge** under the `h` stats panel on HDMI shows the
+> current value against that range (white tick = default).
 > See the *Known issues → triggered-capture drift* note in `README.md`.
 
 ## ROI crop (what the CNN sees)
@@ -69,6 +72,20 @@ list; this file is the annotated version.
 the disc until the on-screen `REC` counter fills (e.g. `1024/1024`). Press `w` to stop, then dump
 and label off-board — see *Stage 3* in `README.md`
 (`scripts/dump_gallery.tcl` → `tools/roi_export.py`).
+
+## Digit position (`scu200_ai_demo02` only)
+The `mbdpu02` CNN also outputs where the digit sits in the ROI, in 28×28 model pixels
+(0 = centred; **dx** left −/right +, **dy** top +/bottom −). On HDMI, a teal **DX** gauge runs
+under the ROI preview and a **DY** gauge down its left side, scaled so each marker lines up with
+the digit centre on the preview; the values print below (`DX +1.2`, `DY -0.4`).
+
+| Key | Action |
+|-----|--------|
+| `A` | auto-target on/off — once per revolution, the mean **dx** of that revolution steps the strobe `target` toward centring (1 count per 0.5 px, max 5, deadband 0.5 px). Needs `S` armed and `F` on. The **TGT** gauge reads **AUTO** while it runs. |
+
+If the loop walks `target` the wrong way (e.g. after `r` reversed the motor), flip
+`DX_TARGET_SIGN` in `main.c`. The verbose line (`v`) adds `DX=… DY=… AUTO=…`; recorded
+captures (`w`) carry dx/dy, exported by `roi_export.py` as `manifest.csv` columns.
 
 ## Diagnostics
 | Key | Action |

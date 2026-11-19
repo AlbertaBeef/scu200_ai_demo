@@ -1,6 +1,7 @@
-# Program the scu200_ai_demo01 design over JTAG: FPGA (.pdi) + app ELF + background + weights.
+# Program a demo design over JTAG: FPGA (.pdi) + app ELF + background + weights.
 #
-#   xsct scripts/program.tcl        (run from the repo root, or anywhere - paths are relative)
+#   xsct scripts/program.tcl [target]   (default scu200_ai_demo01; or scu200_ai_demo02)
+#   (run from the repo root, or anywhere - paths are relative to the repo)
 #
 # Prereqs: Stage 1 (Vivado -> .pdi) and Stage 2 (Vitis -> test_app.elf) built; the background
 # blob generated (tools/png_to_rgb888.py). DDR map: bg 0xB4000000, weights 0xB0000000,
@@ -8,11 +9,7 @@
 set here [file dirname [file normalize [info script]]]
 set root [file dirname $here]
 
-set pdi   $root/Vivado/scu200_ai_demo01/scu200_ai_demo01.runs/impl_1/scu200_ai_demo01_wrapper.pdi
-set elf   $root/Vitis/scu200_ai_demo01_workspace/test_app/build/test_app.elf
-set bg    $root/assets/scu200_ai_demo01_background_rgb.bin
-set wblob $root/train/mbdpu01/mnist_wblob.bin
-set pblob $root/train/mbdpu01/mnist_pblob.bin
+source $here/target.tcl
 
 connect
 device program $pdi
@@ -23,7 +20,7 @@ dow $elf
 if {[file exists $bg]} {
     dow -data $bg 0xB4000000
 } else {
-    puts "WARN: $bg missing - run 'python3 tools/png_to_rgb888.py' (background will be blank)"
+    puts "WARN: $bg missing - run 'python3 tools/png_to_rgb888.py --png assets/${target}_background.png --out $bg' (background will be blank)"
 }
 dow -data $wblob 0xB0000000
 dow -data $pblob 0xB0010000

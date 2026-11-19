@@ -35,6 +35,9 @@
 #define DISC_STROBE_CPR_DEFAULT     979u          // integer counts/rev (display + fine-count RPM)
 #define DISC_STROBE_CPR_Q16_DEFAULT 64199066u     // 979.6 * 65536 (calibrated fractional value)
 #define DISC_STROBE_PULSE_DEFAULT   1000u         // XVS high time in 100 MHz clocks (10 us)
+// C/V trim clamp: default +-20 counts, so the default sits exactly mid-range.
+#define DISC_STROBE_CPR_Q16_MIN     62888346u     // 959.6 * 65536
+#define DISC_STROBE_CPR_Q16_MAX     65509786u     // 999.6 * 65536
 
 // Optional hook: the 'F' console key toggles the camera's FSIN trigger mode via this
 // callback (main registers one wrapping ov9281_set_trigger_mode). Kept separate from the
@@ -52,8 +55,10 @@ void     disc_strobe_set_captures(uint32_t n);  // N evenly-spaced captures/rev 
 uint32_t disc_strobe_position(void);          // live position count (0..cpr-1)
 uint32_t disc_strobe_revs(void);              // revolutions since reset
 uint32_t disc_strobe_cpr(void);               // current counts-per-revolution, integer (for fine-count rate)
-uint32_t disc_strobe_cpr_x10(void);           // cpr x10 (one-decimal display, e.g. 9792 = 979.2)
+uint32_t disc_strobe_cpr_x10(void);           // cpr x10, rounded (one-decimal display, e.g. 9796 = 979.6)
+uint32_t disc_strobe_cpr_q16(void);           // cpr in Q16 (counts x65536), for the on-screen gauge
 uint32_t disc_strobe_target(void);            // current target angle (integer counts)
+uint32_t disc_strobe_target_max(void);        // target clamp: largest t with t < cpr/N (0..t)
 uint32_t disc_strobe_captures(void);          // current captures/rev (N)
 int      disc_strobe_enabled(void);           // 1 = strobe armed, 0 = off
 void     disc_strobe_status(void);            // print state over UART

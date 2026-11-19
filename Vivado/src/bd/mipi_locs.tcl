@@ -153,3 +153,5 @@ dict set mipi_loc_dict scu200 2 data3 { pin R30 pin_name IO_L17P_T2U_N8_45 }
 # scu200_ai_demo01: rotating-disc MNIST demo — single camera on MIPI1 (index 0),
 # same D-PHY pinout as the base scu200 board.
 dict set mipi_loc_dict scu200_ai_demo01 0 [dict get $mipi_loc_dict scu200 0]
+# scu200_ai_demo02: demo01 + mbdpu02 (CNN with digit-position head) — same camera/pinout.
+dict set mipi_loc_dict scu200_ai_demo02 0 [dict get $mipi_loc_dict scu200 0]

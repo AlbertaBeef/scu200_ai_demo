@@ -14,6 +14,7 @@ GET_PART_JOU = vivado_$(TARGET).jou
 # UPDATER START
 scu200_target := xilinx.com scu200
 scu200_ai_demo01_target := xilinx.com scu200
+scu200_ai_demo02_target := xilinx.com scu200
 # UPDATER END
 
 TARGET_LIST := $(sort $(patsubst %_target,%,$(filter %_target,$(.VARIABLES))))
@@ -58,6 +59,7 @@ ip: $(SETTINGS_TCL)
 	BOARD_NAME=$(BOARD_NAME) $(HLS) disc_strobe/run_hls.tcl
 	BOARD_NAME=$(BOARD_NAME) $(HLS) mbpre/run_hls.tcl
 	BOARD_NAME=$(BOARD_NAME) $(HLS) mbdpu01/run_hls.tcl
+	BOARD_NAME=$(BOARD_NAME) $(HLS) mbdpu02/run_hls.tcl
 	touch $(DONE_FILE)
 
 .PHONY: clean

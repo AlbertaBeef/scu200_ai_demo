@@ -13,10 +13,20 @@
 /Vivado/ip/*.log
 /Vivado/ip/*.jou
 /Vivado/ip/logs/
-/Vivado/ip/mbdpu01/data/          # MNIST dataset (torchvision download; retrain only)
+
+# ---- MNIST dataset (torchvision download; retrain only) ----
+/data/
+/Vivado/ip/*/data/
+
+# ---- tool leftovers when Vivado/XSCT run from the repo root ----
+/vivado*.jou
+/vivado*.log
+/vivado_pid*.str
+/.Xil/
 
 # ---- capture datasets: keep *.npz + manifest.csv; ignore raw/derived (regenerable) ----
 /train/captures/**/roi_gallery.bin
+/train/captures/ddr_*.bin
 /train/captures/**/crop/
 /train/captures/**/img28/
 /train/captures/**/contact_sheet.png

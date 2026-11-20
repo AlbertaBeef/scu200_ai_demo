@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCU200 Auto-Target Run</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one column, an instrument-style readout strip above two stacked plots sharing an x axis */
+:root{
+  --bg:#f5f7f7; --panel:#ffffff; --fg:#14201f; --muted:#5b6b6a; --grid:#dfe6e5; --rule:#c9d3d2;
+  --dx:#0a9f9f; --dy:#c97a12; --tgt:#3e4fb8; --band:rgba(10,159,159,.09);
+  --sans:"IBM Plex Sans",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0c1213; --panel:#121b1c; --fg:#e3eceb; --muted:#8fa2a1; --grid:#1f2c2d; --rule:#2b3b3c;
+  --dx:#22e6e6; --dy:#f2a93b; --tgt:#8e9bff; --band:rgba(34,230,230,.08); color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0c1213; --panel:#121b1c; --fg:#e3eceb; --muted:#8fa2a1; --grid:#1f2c2d; --rule:#2b3b3c;
+  --dx:#22e6e6; --dy:#f2a93b; --tgt:#8e9bff; --band:rgba(34,230,230,.08); color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans)}
+main{max-width:1000px;margin:0 auto;padding-block:28px 40px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:20px}
+h1{font-size:1.5rem;font-weight:600;margin:0;text-wrap:balance}
+.sub{color:var(--muted);margin:4px 0 0;max-width:68ch;line-height:1.5}
+.read{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule);border-radius:6px;overflow:hidden}
+.read div{background:var(--panel);padding:12px 14px;display:flex;flex-direction:column;gap:4px}
+.read b{font-family:var(--mono);font-size:1.25rem;font-weight:500;font-variant-numeric:tabular-nums}
+.read span{font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.read i{font-style:normal;font-size:.8rem;color:var(--muted)}
+.plot{background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:12px 8px 6px;position:relative}
+.plot h2{font-size:.8rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 8px 6px;font-weight:500;display:flex;gap:14px;flex-wrap:wrap}
+.key{display:inline-flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;color:var(--fg);font-family:var(--mono)}
+.key::before{content:"";width:14px;height:3px;border-radius:2px;background:var(--c)}
+svg{display:block;width:100%;height:auto;font-family:var(--mono);font-size:11px}
+svg text{fill:var(--muted)}
+#tip{position:absolute;pointer-events:none;background:var(--bg);border:1px solid var(--rule);border-radius:4px;padding:6px 8px;font:12px/1.45 var(--mono);white-space:nowrap;font-variant-numeric:tabular-nums}
+.note{color:var(--muted);font-size:.85rem;line-height:1.5;max-width:75ch;margin:0}
+</style>
+<main>
+<header>
+  <h1>Auto-target overnight run</h1>
+  <p class="sub">mbdpu02 position head on the rotating disc. DX steers the strobe target once per revolution; DY is display only. Values are 5-line averages of the verbose console log, in 28×28 model pixels.</p>
+</header>
+<section class="read" id="read"></section>
+<section class="plot" id="p1"><h2>Digit position (px) <span class="key" style="--c:var(--dx)">DX</span><span class="key" style="--c:var(--dy)">DY</span><span class="key" style="--c:var(--band)">deadband ±0.5</span></h2><svg id="s1"></svg></section>
+<section class="plot" id="p2"><h2>Strobe target (counts) <span class="key" style="--c:var(--tgt)">TGT</span></h2><svg id="s2"></svg></section>
+<p class="note">X axis is the console line number (the log carries no timestamps). Each auto step is +1 count; the steady climb is the residual strobe drift (true cpr ≈ 979.62 vs the 979.6 set), absorbed by the loop. DY sits about 1.2 px low; one press of <code>i</code> would re-centre it.</p>
+<div id="tip" hidden></div>
+</main>
+<script>
+const R=[[0.28,-0.86,57],[-1.49,-1.16,57],[-0.57,-1.36,57],[0.09,-1.29,57],[0.14,-0.87,57],[0.39,-1.19,57],[0.01,-0.71,57],[-1.04,-1.31,57],[0.25,-1.25,57],[-0.20,-1.26,57],[-0.04,-1.04,57],[0.67,-0.96,57],[-0.80,-1.19,57],[-0.92,-1.20,57],[-0.02,-1.03,57],[0.29,-0.97,57],[-0.65,-1.16,57],[-0.07,-1.21,57],[0.41,-1.48,57],[1.03,-1.35,57],[-0.12,-1.12,57],[0.48,-0.59,57],[-0.09,-0.82,57],[0.32,-1.11,58],[0.80,-1.25,58],[0.59,-1.60,58],[0.23,-1.34,58],[0.93,-1.38,58],[-0.10,-0.90,58],[0.01,-1.16,58],[0.05,-1.10,58],[0.15,-1.47,58],[0.13,-1.37,59],[0.73,-1.31,59],[-0.02,-1.58,59],[-0.32,-0.86,59],[0.16,-0.87,59],[-0.05,-1.33,59],[0.73,-1.15,59],[0.47,-1.54,59],[0.61,-1.33,60],[0.75,-1.41,60],[-0.87,-1.42,60],[-0.18,-1.17,60],[-0.12,-1.08,60],[0.92,-1.35,60],[0.41,-1.58,60],[0.05,-0.95,60],[0.57,-1.53,60],[0.36,-0.82,60],[0.01,-1.29,60],[0.29,-1.10,61],[0.30,-1.27,61],[-0.48,-1.31,61],[0.78,-1.17,61],[0.32,-0.74,61],[0.08,-0.94,61],[0.68,-1.27,62],[0.12,-1.33,62],[0.26,-1.43,62],[0.26,-1.28,62],[0.01,-0.93,62],[0.60,-1.15,62],[0.35,-1.45,62],[-0.29,-1.21,62],[0.34,-1.36,62],[-0.10,-1.02,63],[-0.20,-1.27,63],[0.76,-1.15,63],[-0.13,-1.10,63],[-0.25,-0.93,63],[0.63,-1.12,63],[-0.48,-0.98,63],[0.31,-1.38,63],[0.77,-1.18,63],[0.35,-1.03,63],[0.96,-0.89,64],[0.68,-1.01,64],[-0.14,-0.89,64],[0.41,-1.44,64],[0.13,-1.02,64],[1.14,-1.01,65],[-0.36,-1.24,65],[0.21,-1.24,65],[-0.05,-1.31,65],[0.68,-1.41,65],[-0.13,-1.02,65],[0.75,-1.16,65],[-0.14,-0.92,65],[0.28,-1.43,65],[0.79,-1.17,65],[0.19,-0.77,65],[0.05,-1.44,65],[0.42,-1.06,65],[0.81,-0.68,65],[-0.59,-0.94,65],[0.65,-0.78,65],[0.55,-1.05,66],[-0.11,-0.87,66],[-0.02,-1.35,66],[0.02,-1.19,66],[0.49,-1.49,66],[0.55,-1.01,67],[0.41,-1.24,67],[0.57,-1.09,67],[-0.47,-1.32,67],[0.53,-1.39,67],[0.53,-1.11,67],[0.73,-1.24,67],[-0.27,-1.21,67],[0.98,-0.80,68],[0.27,-1.24,68],[0.27,-1.29,68],[0.72,-0.96,68],[0.42,-1.05,68],[-0.19,-1.13,68],[0.31,-1.10,68],[0.25,-1.31,68],[0.04,-1.11,68],[0.60,-0.99,68],[-0.34,-1.29,68],[-0.10,-1.12,68],[-0.44,-1.32,68],[0.36,-1.17,69],[0.12,-1.16,69],[0.48,-1.33,69],[0.32,-1.42,69],[0.45,-1.27,69],[-0.32,-0.83,69],[0.69,-0.71,69],[0.58,-0.97,70],[0.30,-1.02,70],[0.12,-1.42,70],[0.01,-1.11,70],[0.20,-1.16,70],[0.34,-1.47,70],[0.73,-1.04,70],[0.27,-1.07,70],[0.61,-1.45,70],[-0.32,-1.17,70],[0.44,-1.05,71],[0.77,-1.18,71],[0.31,-0.72,71],[-1.08,-1.21,71],[-0.50,-1.55,71],[0.10,-0.97,71],[0.96,-1.13,71],[-0.36,-1.10,71],[0.27,-1.11,71],[0.21,-1.06,71],[0.53,-0.65,71],[0.15,-1.31,71],[-0.43,-0.97,72],[0.62,-1.11,72],[0.34,-0.77,72],[0.16,-1.47,72],[-0.32,-1.12,72],[0.51,-0.99,72],[0.62,-0.96,73],[0.40,-1.21,73],[-0.60,-1.30,73],[-0.05,-1.20,73],[0.23,-0.81,73],[-0.18,-1.35,73],[0.64,-1.44,73],[-0.17,-1.23,73],[0.05,-1.10,73],[0.07,-1.37,73],[1.02,-1.10,73],[0.01,-1.12,73],[0.23,-1.15,74],[0.09,-1.22,74],[-0.28,-1.04,74],[0.30,-1.20,74],[0.71,-1.00,74],[0.26,-1.17,74],[0.83,-1.10,74],[-0.08,-1.08,74],[0.99,-1.21,74],[0.14,-1.08,74],[0.12,-1.23,74],[-0.12,-1.03,75],[-0.20,-1.62,75],[0.11,-0.91,75],[0.16,-1.46,75],[0.45,-1.18,75],[-0.15,-0.99,75],[0.51,-1.48,75],[-0.26,-1.10,75],[0.67,-1.53,75],[0.51,-1.21,75],[0.21,-0.67,75],[1.00,-1.22,75],[0.32,-0.90,75],[0.49,-1.33,75],[0.71,-1.07,76],[0.22,-1.14,76],[0.10,-1.38,76],[-0.00,-1.34,76],[0.48,-1.02,77],[-0.14,-1.24,77],[0.36,-1.17,77],[-0.01,-0.54,77],[-0.18,-1.47,77],[0.19,-0.73,77],[-0.28,-1.41,77],[0.54,-1.42,77],[-0.13,-0.83,77],[0.45,-1.53,77],[0.35,-0.86,77],[0.06,-1.63,77],[0.11,-0.74,78],[-0.09,-1.24,78],[-0.18,-0.88,78],[0.47,-0.81,78],[0.22,-1.58,78],[0.22,-1.26,78],[-0.43,-1.03,78],[-0.80,-1.41,78],[-0.44,-1.26,78]];
+const N=5, X=R.map((_,i)=>i*N), xmax=X[X.length-1];
+const W=960,L=48,Rm=14;
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const mean=a=>a.reduce((s,v)=>s+v,0)/a.length;
+const dx=R.map(r=>r[0]),dy=R.map(r=>r[1]),tg=R.map(r=>r[2]);
+const f=(v,d=2)=>(v>=0?"+":"")+v.toFixed(d);
+document.getElementById("read").innerHTML=[
+ ["Target",tg[0]+" → "+tg[tg.length-1],"+"+(tg[tg.length-1]-tg[0])+" counts, all +1 steps"],
+ ["Mean DX",f(mean(dx))+" px","range "+f(Math.min(...dx))+" … "+f(Math.max(...dx))],
+ ["Mean DY",f(mean(dy))+" px","range "+f(Math.min(...dy))+" … "+f(Math.max(...dy))],
+ ["Log lines",String(R.length*N),R.length+" averaged points"]
+].map(([s,b,i])=>`<div><span>${s}</span><b>${b}</b><i>${i}</i></div>`).join("");
+function plot(id,H,series,y0,y1,step,extra){
+  const s=document.getElementById(id),T=10,B=H-24;
+  const sx=x=>L+(x/xmax)*(W-L-Rm), sy=v=>T+(y1-v)/(y1-y0)*(B-T);
+  s.setAttribute("viewBox",`0 0 ${W} ${H}`);
+  let g="";
+  if(extra) g+=extra(sx,sy);
+  for(let v=y0;v<=y1+1e-9;v+=step){const y=sy(v).toFixed(1);
+    g+=`<line x1="${L}" x2="${W-Rm}" y1="${y}" y2="${y}" stroke="${v===0?css('--rule'):css('--grid')}" stroke-width="${v===0?1.2:1}"/><text x="${L-6}" y="${+y+4}" text-anchor="end">${Number.isInteger(step)?v:v.toFixed(1)}</text>`;}
+  for(let x=0;x<=xmax;x+=200){g+=`<text x="${sx(x)}" y="${H-6}" text-anchor="middle">${x}</text>`;}
+  for(const [vals,col,stepped] of series){
+    let d="";vals.forEach((v,i)=>{const px=sx(X[i]).toFixed(1),py=sy(v).toFixed(1);
+      if(!i)d+=`M${px},${py}`;else d+=stepped?`H${px}V${py}`:`L${px},${py}`;});
+    g+=`<path d="${d}" fill="none" stroke="${css(col)}" stroke-width="${stepped?2.2:1.6}" stroke-linejoin="round"/>`;
+    const i=vals.length-1;g+=`<circle cx="${sx(X[i])}" cy="${sy(vals[i])}" r="3.5" fill="${css(col)}"/>`;
+  }
+  g+=`<line id="${id}c" y1="${T}" y2="${B}" stroke="${css('--muted')}" stroke-dasharray="3 3" visibility="hidden"/>`;
+  s.innerHTML=g;return {s,sx};
+}
+function draw(){
+  const a=plot("s1",300,[[dx,"--dx"],[dy,"--dy"]],-2,1.5,0.5,(sx,sy)=>`<rect x="${L}" width="${W-L-Rm}" y="${sy(0.5)}" height="${sy(-0.5)-sy(0.5)}" fill="${css('--band')}"/>`);
+  const b=plot("s2",200,[[tg,"--tgt",true]],55,80,5);
+  const tip=document.getElementById("tip");
+  for(const {s,sx} of [a,b]){
+    s.onpointermove=e=>{const r=s.getBoundingClientRect(),vx=(e.clientX-r.left)/r.width*W;
+      const i=Math.max(0,Math.min(R.length-1,Math.round((vx-L)/(W-L-Rm)*xmax/N)));
+      for(const id of["s1","s2"]){const c=document.getElementById(id+"c");c.setAttribute("x1",sx(X[i]));c.setAttribute("x2",sx(X[i]));c.setAttribute("visibility","visible");}
+      tip.innerHTML=`line ${X[i]}<br><span style="color:var(--dx)">DX ${f(dx[i])}</span><br><span style="color:var(--dy)">DY ${f(dy[i])}</span><br><span style="color:var(--tgt)">TGT ${tg[i]}</span>`;
+      tip.hidden=false;tip.style.top=(e.pageY+12)+"px";tip.style.left=Math.min(e.pageX+14,document.documentElement.clientWidth-130)+"px";};
+    s.onpointerleave=()=>{tip.hidden=true;for(const id of["s1","s2"])document.getElementById(id+"c").setAttribute("visibility","hidden");};
+  }
+}
+draw();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",draw);
+new MutationObserver(draw).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+</script>
+
+</html>

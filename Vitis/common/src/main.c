@@ -86,6 +86,11 @@ static uint32_t g_exposure      = 32;     /* OV9281 manual exposure (lines) — 
 static uint32_t g_gain          = 128;    /* OV9281 analog gain in 1/16x (128 = 8.0x); live via ]/[ keys */
 static Frmbuf      *g_cam_frmbuf = 0;   /* camera 0 frame buffer (set after camera init) */
 static volatile int g_trig_active = 0;  /* FSIN-trigger mode active -> worker gates dim frames */
+static RpiCamera   *g_ov9281_cam = 0;  /* for the watchdog re-init (gpio reset + mode) */
+/* Last strobe-target change (auto loop), for correlating with camera lock-ups. */
+static uint32_t g_tchg_rev = 0, g_tchg_from = 0, g_tchg_to = 0;
+static int      g_tchg_wrap = 0, g_tchg_valid = 0;
+static uint32_t g_cam_wd_count = 0;     /* watchdog re-inits since boot */
 
 static void ov9281_fsin_trigger_cb(int enable)
 {
@@ -104,6 +109,42 @@ static void ov9281_fsin_trigger_cb(int enable)
         g_cam_frmbuf->AppDrivesRd = (u8)(enable ? 1 : 0);
         if (!enable) g_cam_frmbuf->DisplayHeldAddr = 0;   /* release the hold -> ISR uses all slots */
     }
+}
+
+/* Camera watchdog. In FSIN-trigger mode with the strobe armed and the disc turning, every
+ * revolution must deliver N frames. If CAM_WD_REVS revolutions pass with no completed frame,
+ * the OV9281 has locked up (MIPI lanes idle in stop state; not even free-run recovers it), so
+ * hardware-reset and re-configure it, restore exposure/gain, and re-enter trigger mode. */
+#define CAM_WD_REVS 3u
+static void cam_watchdog(void)
+{
+    static uint32_t last_seq = 0, last_rev = 0;
+    if (!g_ov9281_present || !g_ov9281_cam || !g_cam_frmbuf) return;
+    uint32_t seq = g_cam_frmbuf->FrameSeq, rev = disc_strobe_revs();
+    if (seq != last_seq || !g_trig_active || !disc_strobe_enabled()) {
+        last_seq = seq; last_rev = rev; return;           /* frames flowing, or not expected */
+    }
+    if ((uint32_t)(rev - last_rev) < CAM_WD_REVS) return;   /* disc stopped -> never trips */
+
+    g_cam_wd_count++;
+    xil_printf("cam: WATCHDOG #%lu - no frame for %lu revs (seq=%lu rev=%lu pos=%lu target=%lu)\r\n",
+               (unsigned long)g_cam_wd_count, (unsigned long)(rev - last_rev), (unsigned long)seq,
+               (unsigned long)rev, (unsigned long)disc_strobe_position(),
+               (unsigned long)disc_strobe_target());
+    if (g_tchg_valid)
+        xil_printf("cam:   last target change %lu->%lu%s at rev %lu (%lu revs before trip)\r\n",
+                   (unsigned long)g_tchg_from, (unsigned long)g_tchg_to, g_tchg_wrap ? " WRAP" : "",
+                   (unsigned long)g_tchg_rev, (unsigned long)(rev - g_tchg_rev));
+    else
+        xil_printf("cam:   no auto target change since boot\r\n");
+
+    RpiCamera *c = g_ov9281_cam;
+    ov9281_config(c->iic_id, c->gpio, c->gpio_mask);   /* gpio reset + soft reset + mode + stream */
+    ov9281_set_exposure(c->iic_id, g_exposure);
+    ov9281_set_gain(c->iic_id, g_gain);
+    ov9281_set_trigger_mode(c->iic_id, 1);
+    xil_printf("cam: watchdog re-init done\r\n");
+    last_seq = g_cam_frmbuf->FrameSeq; last_rev = disc_strobe_revs();
 }
 #endif
 
@@ -234,10 +275,9 @@ static uintptr_t g_bg_back  = BG_IMG_BUF_B;
 #define STAT_PANEL_Y 515
 #define STAT_PANEL_W 230      /* must match mnist_stats_panel() W/H */
 #define STAT_PANEL_H 320
-#define CPR_GAUGE_X  STAT_PANEL_X                     /* cpr gauge: directly under the 'h' panel, */
-#define CPR_GAUGE_Y  (STAT_PANEL_Y + STAT_PANEL_H + 10)  /* same width; camera window ends y=980 */
-#define CPR_GAUGE_W  STAT_PANEL_W
-#define TGT_GAUGE_Y  (CPR_GAUGE_Y + 58 + 6)           /* target gauge under the cpr gauge (ends ~967) */
+#define TGT_GAUGE_X  1300     /* compact target/AUTO gauge, between digit-9's bar (ends y~864) and */
+#define TGT_GAUGE_Y  906      /* the background's "Classification" title (y 990 over these columns). */
+#define TGT_GAUGE_W  192      /* Mid tick at x0+(w-1)/2 ~ 1395 = DX centre tick (ROI_X 1340 + 56). */
 static int g_hud_on = 0;      /* 'h' toggles the stats panel + ROI box together; default OFF */
 static int g_verbose = 1;     /* 'v' toggles a 1/sec one-line console dump of the panel; default ON */
 static void hud_clear_panel(void);  /* fwd decl: used by the 'h' key handler above its definition */
@@ -298,7 +338,8 @@ static uint32_t g_frm_min = 255, g_frm_max = 0;   /* TEST probe: brightness rang
  * around the ROI preview; with auto-target ('A') the mean dx over one revolution nudges the
  * strobe target. Sign: on the rig the digits sweep right->left in the image (take02: later
  * strobes -> smaller ink-x), so a digit right of centre (dx>0) means the strobe fired early
- * -> raise target. Flip DX_TARGET_SIGN if the loop runs away (e.g. motor reversed with 'r'). */
+ * -> raise target (confirmed on the rig: dx > 0 -> increase target). Target wraps within
+ * 0..target_max. Flip DX_TARGET_SIGN if the loop runs away (e.g. motor reversed with 'r'). */
 #if defined(XPAR_MBDPU02_S_AXI_CONTROL_BASEADDR) || defined(XPAR_MBDPU02_BASEADDR)
 #define MBDPU_HAS_POS 1
 #define DX_TARGET_SIGN      (+1)
@@ -340,8 +381,12 @@ static int mnist_crop_key(int ch)
     case 'k': { uint32_t my = MNIST_FRAME_H - crop; g_crop_y0 = (g_crop_y0 + step < my) ? g_crop_y0 + step : my; } break;
     case 'o': mnist_crop_recenter(); break;
 #ifdef MBDPU_HAS_POS
-    case 'A': g_auto_tgt = !g_auto_tgt; g_auto_sum = 0; g_auto_n = 0;
-              xil_printf("auto-target: %s (dx -> target, once per rev; needs S armed + F on)\r\n",
+    case 'A': if (!g_auto_tgt && !(disc_strobe_enabled() && g_trig_active)) {
+                  xil_printf("auto-target: not enabled - needs strobe ARMED (S) and FSIN trigger ON (F)\r\n");
+                  return 1;
+              }
+              g_auto_tgt = !g_auto_tgt; g_auto_sum = 0; g_auto_n = 0;
+              xil_printf("auto-target: %s (dx -> target, once per rev)\r\n",
                          g_auto_tgt ? "ON" : "off"); return 1;
 #endif
 #ifdef STATS_ENABLE
@@ -559,17 +604,8 @@ static inline void rt_arm(void)
  * register reads until a window actually elapses. */
 static void stats_service(void)
 {
-	/* cpr + target gauges under the 'h' stats panel: always shown, repainted only on change. */
-	{ static uint32_t last_q16 = 0u;
-	  uint32_t q = disc_strobe_cpr_q16();
-	  if (q != last_q16) {
-		last_q16 = q;
-		mnist_cpr_gauge(BG_IMG_BUF,   (u32)(VMODE_WIDTH*3u), CPR_GAUGE_X, CPR_GAUGE_Y, CPR_GAUGE_W,
-		                q, DISC_STROBE_CPR_Q16_MIN, DISC_STROBE_CPR_Q16_MAX, DISC_STROBE_CPR_Q16_DEFAULT);
-		mnist_cpr_gauge(BG_IMG_BUF_B, (u32)(VMODE_WIDTH*3u), CPR_GAUGE_X, CPR_GAUGE_Y, CPR_GAUGE_W,
-		                q, DISC_STROBE_CPR_Q16_MIN, DISC_STROBE_CPR_Q16_MAX, DISC_STROBE_CPR_Q16_DEFAULT);
-	  } }
-	/* target gauge under it: redrawn when target or its max (cpr/N) changes. */
+	/* target gauge under the ROI preview: always shown, redrawn when target, its max
+	 * (cpr/N) or the auto flag changes. */
 	{ static uint32_t last_t = 0xFFFFFFFFu, last_tm = 0xFFFFFFFFu; static int last_a = -1;
 #ifdef MBDPU_HAS_POS
 	  int a = g_auto_tgt;
@@ -579,8 +615,8 @@ static void stats_service(void)
 	  uint32_t t = disc_strobe_target(), tm = disc_strobe_target_max();
 	  if (t != last_t || tm != last_tm || a != last_a) {
 		last_t = t; last_tm = tm; last_a = a;
-		mnist_target_gauge(BG_IMG_BUF,   (u32)(VMODE_WIDTH*3u), CPR_GAUGE_X, TGT_GAUGE_Y, CPR_GAUGE_W, t, tm, a);
-		mnist_target_gauge(BG_IMG_BUF_B, (u32)(VMODE_WIDTH*3u), CPR_GAUGE_X, TGT_GAUGE_Y, CPR_GAUGE_W, t, tm, a);
+		mnist_target_gauge(BG_IMG_BUF,   (u32)(VMODE_WIDTH*3u), TGT_GAUGE_X, TGT_GAUGE_Y, TGT_GAUGE_W, t, tm, a);
+		mnist_target_gauge(BG_IMG_BUF_B, (u32)(VMODE_WIDTH*3u), TGT_GAUGE_X, TGT_GAUGE_Y, TGT_GAUGE_W, t, tm, a);
 	  } }
 
 	uint32_t cpr  = disc_strobe_cpr(); if (cpr == 0u) cpr = 1u;
@@ -1712,6 +1748,7 @@ int main() {
             g_ov9281_iic = rcam->iic_id;
             g_ov9281_present = 1;
             g_cam_frmbuf = &(ActiveCams[i].VideoPipePtr->Frmbuf);   /* for the 'B' FrameSeq probe */
+            g_ov9281_cam = rcam;                                     /* for cam_watchdog() */
             ov9281_set_exposure(rcam->iic_id, g_exposure);          /* apply default exposure */
             ov9281_set_gain(rcam->iic_id, g_gain);                  /* apply default gain (brightness) */
             disc_strobe_set_cam_cb(ov9281_fsin_trigger_cb);
@@ -1809,6 +1846,15 @@ int main() {
 	do {
 #ifdef MOTOR_PRESENT
 		motor_poll();   /* non-blocking motor command handling; video stays live */
+#if defined(DISC_STROBE_PRESENT)
+		cam_watchdog();  /* re-init the OV9281 if FSIN frames stop while the disc turns */
+#endif
+#ifdef MBDPU_HAS_POS
+		if (g_auto_tgt && !(disc_strobe_enabled() && g_trig_active)) {   /* S disarmed or F off */
+			g_auto_tgt = 0; g_auto_sum = 0; g_auto_n = 0;
+			xil_printf("auto-target: off (strobe disarmed or FSIN trigger off)\r\n");
+		}
+#endif
 #endif
 #ifdef STATS_ENABLE
 		stats_service();   /* ~2 Hz: refresh the on-screen RPM / captures-per-second HUD */
@@ -1898,8 +1944,22 @@ int main() {
 						int step = (int)(mean_dx / 50) * DX_TARGET_SIGN;
 						if (step >  AUTO_STEP_MAX) step =  AUTO_STEP_MAX;
 						if (step < -AUTO_STEP_MAX) step = -AUTO_STEP_MAX;
-						int t = (int)disc_strobe_target() + step;
-						disc_strobe_set_target(t < 0 ? 0u : (uint32_t)t);   /* clamps to max */
+						/* Wrap within one strobe period (0..target_max): the fire points are
+						 * target + k*cpr/N, so stepping past either end continues on the
+						 * neighbouring fire point instead of sticking at the limit. */
+						int span = (int)disc_strobe_target_max() + 1;
+						int t0 = (int)disc_strobe_target();
+						int t = (t0 + step) % span;
+						if (t < 0) t += span;
+						disc_strobe_set_target((uint32_t)t);
+						g_tchg_rev = disc_strobe_revs(); g_tchg_from = (uint32_t)t0;
+						g_tchg_to = (uint32_t)t; g_tchg_valid = 1;
+						g_tchg_wrap = (t0 + step < 0 || t0 + step >= span);
+						xil_printf("auto: mean dx=%c%d.%02d -> target %d->%d%s (rev %lu pos %lu)\r\n",
+						           mean_dx < 0 ? '-' : '+', (int)(mean_dx < 0 ? -mean_dx : mean_dx) / 100,
+						           (int)(mean_dx < 0 ? -mean_dx : mean_dx) % 100, t0, t,
+						           g_tchg_wrap ? " WRAP" : "", (unsigned long)g_tchg_rev,
+						           (unsigned long)disc_strobe_position());
 					}
 				}
 			}

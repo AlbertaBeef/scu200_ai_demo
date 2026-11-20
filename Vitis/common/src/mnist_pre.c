@@ -155,6 +155,7 @@ static const uint8_t GLYPH_T[7]  = {0x1F,0x04,0x04,0x04,0x04,0x04,0x04};
 static const uint8_t GLYPH_U[7]  = {0x11,0x11,0x11,0x11,0x11,0x11,0x0E};
 static const uint8_t GLYPH_V[7]  = {0x11,0x11,0x11,0x11,0x11,0x0A,0x04};
 static const uint8_t GLYPH_X[7]  = {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11};
+static const uint8_t GLYPH_Y[7]  = {0x11,0x11,0x0A,0x04,0x04,0x04,0x04};
 
 // Map a character to its 7-row bitmap (digits reuse the bar-chart FONT5x7). Unknown -> blank.
 static const uint8_t *osd_glyph_rows(char c)
@@ -168,7 +169,8 @@ static const uint8_t *osd_glyph_rows(char c)
     case 'L': return GLYPH_L;   case 'M': return GLYPH_M;   case 'N': return GLYPH_N;
     case 'O': return GLYPH_O;   case 'P': return GLYPH_P;   case 'R': return GLYPH_R;
     case 'S': return GLYPH_S;   case 'T': return GLYPH_T;   case 'U': return GLYPH_U;
-    case 'V': return GLYPH_V;   case 'X': return GLYPH_X;   default:  return GLYPH_SP;
+    case 'V': return GLYPH_V;   case 'X': return GLYPH_X;   case 'Y': return GLYPH_Y;
+    default:  return GLYPH_SP;
     }
 }
 
@@ -261,7 +263,7 @@ void mnist_stats_panel(uintptr_t fb, uint32_t stride, int x0, int y0, const mnis
     Xil_DCacheFlushRange(fb + (uintptr_t)y0*stride, (uintptr_t)H*stride);
 }
 
-#define GAUGE_H   58            /* gauge box height: label row + track/marker */
+#define GAUGE_H   38            /* gauge box height: label row (scale 2) + track/marker */
 
 /* Shared gauge: label left, value text right-aligned, then a track spanning [mn, mx] with a
  * teal fill from the reference point to the value and a teal marker at the value. With
@@ -272,8 +274,8 @@ static void gauge_draw(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
                        uint32_t val, uint32_t mn, uint32_t mx, uint32_t ref, int show_ref)
 {
     const uint32_t BLACK = 0x000000u, WHITE = 0xF0F4F8u, TEAL = 0x22E6E6u, TRACK = 0x303840u;
-    enum { S = 3, TRK_H = 8, MK_W = 6, MK_H = 22 };
-    const int TRK_Y = y0 + 34;
+    enum { S = 2, TRK_H = 6, MK_W = 4, MK_H = 16 };
+    const int TRK_Y = y0 + 22;
 
     if (val < mn) val = mn;
     if (val > mx) val = mx;
@@ -290,21 +292,13 @@ static void gauge_draw(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
     osd_fill(fb, stride, x0, TRK_Y, w, TRK_H, TRACK);
     int a = xv < xr ? xv : xr, b = xv < xr ? xr : xv;
     osd_fill(fb, stride, x0 + a, TRK_Y, b - a + 1, TRK_H, TEAL);
-    if (show_ref) osd_fill(fb, stride, x0 + xr - 1, TRK_Y - 6, 2, TRK_H + 12, WHITE);
+    if (show_ref) osd_fill(fb, stride, x0 + xr - 1, TRK_Y - 5, 2, TRK_H + 10, WHITE);
     int mk = x0 + xv - MK_W/2;
     if (mk < x0 - 3) mk = x0 - 3;
     if (mk > x0 + w + 3 - MK_W) mk = x0 + w + 3 - MK_W;
     osd_fill(fb, stride, mk, TRK_Y + TRK_H/2 - MK_H/2, MK_W, MK_H, TEAL);
 
     Xil_DCacheFlushRange(fb + (uintptr_t)y0*stride, (uintptr_t)GAUGE_H*stride);
-}
-
-void mnist_cpr_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
-                     uint32_t cpr_q16, uint32_t min_q16, uint32_t max_q16, uint32_t def_q16)
-{
-    char v[16];
-    osd_fx10(v, (int)(((uint64_t)cpr_q16 * 10u + 32768u) >> 16));   /* rounded to 0.1 */
-    gauge_draw(fb, stride, x0, y0, w, "CPR", v, cpr_q16, min_q16, max_q16, def_q16, 1);
 }
 
 void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
@@ -323,7 +317,8 @@ void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
  * equals the preview's own extent: each marker sits exactly where the digit centre is drawn.
  *   DX: horizontal, under the preview      (x ROI_X..+112, y POS_DX_Y)       left -, right +
  *   DY: vertical, left of the preview      (x POS_DY_X, y ROI_Y..+112)       top +, bottom -
- * Values print below the DX gauge ("DX +1.2" / "DY -0.4", scale 2). Whole box repainted and
+ * Values (scale 2), label over value: "DX"/"+1.2" under the DX gauge, centred on its zero
+ * tick; "DY"/"-0.4" left of the DY gauge, value right-aligned to it, label over its first digit. Whole box repainted and
  * cache-flushed every call (drawn into the back buffer each capture, like the bars). */
 #define POS_SPAN   (MNIST_DIM*ROI_S)        /* 112 screen px = 28 model px */
 #define POS_PPX    ROI_S                    /* 4 screen px per model px */
@@ -333,7 +328,9 @@ void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
 #define POS_MK_L   16                       /* marker length across the track */
 #define POS_MK_W   4                        /* marker width along the track */
 #define POS_TXT_Y  (POS_DX_Y + 18)          /* first value line */
-#define POS_BOX_X0 (POS_DY_X - 6)
+#define POS_DYT_R  (POS_DY_X - 10)        /* DY text right edge (left of the DY track) */
+#define POS_DYT_W  64                       /* DY text column width ("-14.0" at scale 2) */
+#define POS_BOX_X0 (POS_DYT_R - POS_DYT_W)
 #define POS_BOX_Y1 (POS_TXT_Y + 2*18)       /* two text lines of 14 px + gap */
 
 static void pos_fmt(char *buf, int v_x100)   /* "+1.2" / "-0.4", rounded to 0.1 */
@@ -373,10 +370,11 @@ void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100)
     osd_fill(fb, stride, tx + POS_TRK/2 - POS_MK_L/2, cy - oy - POS_MK_W/2, POS_MK_L, POS_MK_W, TEAL);
 
     /* values */
-    osd_text(fb, stride, ROI_X, POS_TXT_Y, 2, "DX", WHITE, BLACK);
-    pos_fmt(v, dx_x100); osd_text(fb, stride, ROI_X + POS_SPAN - osd_textw(v, 2), POS_TXT_Y, 2, v, TEAL, BLACK);
-    osd_text(fb, stride, ROI_X, POS_TXT_Y + 18, 2, "DY", WHITE, BLACK);
-    pos_fmt(v, dy_x100); osd_text(fb, stride, ROI_X + POS_SPAN - osd_textw(v, 2), POS_TXT_Y + 18, 2, v, TEAL, BLACK);
+    osd_text(fb, stride, cx - osd_textw("DX", 2)/2, POS_TXT_Y, 2, "DX", WHITE, BLACK);
+    pos_fmt(v, dx_x100); osd_text(fb, stride, cx - osd_textw(v, 2)/2, POS_TXT_Y + 18, 2, v, TEAL, BLACK);
+    pos_fmt(v, dy_x100);                       /* label starts over the value's first digit */
+    osd_text(fb, stride, POS_DYT_R - osd_textw(v, 2) + osd_textw(" ", 2), cy - 18, 2, "DY", WHITE, BLACK);
+    osd_text(fb, stride, POS_DYT_R - osd_textw(v, 2), cy + 4, 2, v, TEAL, BLACK);
 
     Xil_DCacheFlushRange(fb + (uintptr_t)(ROI_Y - 4)*stride, (uintptr_t)(POS_BOX_Y1 - (ROI_Y - 4))*stride);
 }

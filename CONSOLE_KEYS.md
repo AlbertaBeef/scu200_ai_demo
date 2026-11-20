@@ -30,7 +30,7 @@ list; this file is the annotated version.
 | `S` | arm / disarm the strobe |
 | `F` | fire an FSIN trigger |
 | `N` | captures per revolution: cycles `1 / 2 / 4 / 8 / 16` |
-| `T` / `G` | target position ± 5 (clamped to `0 … cpr/N`, default mid-point; shown on the HDMI **TGT** gauge) |
+| `T` / `G` | target position ± 5 (clamped to `0 … cpr/N`, default mid-point; shown on the HDMI **TGT** gauge under the ROI preview) |
 | `C` / `V` | **`cpr` ± 0.1** — the drift-null trim (see below) |
 | `Y` | strobe status |
 
@@ -38,8 +38,7 @@ list; this file is the annotated version.
 > residual drift remains. `cpr` (counts per disc-revolution, default **979.6**) nudges the phase
 > accumulator to null it out live. Watch the captured frames "hold still", then leave `cpr` there.
 > The trim is clamped to **959.6 – 999.6** (default ± 20, so the default sits mid-range); the console
-> appends `(min)`/`(max)` at a limit. A teal **CPR gauge** under the `h` stats panel on HDMI shows the
-> current value against that range (white tick = default).
+> appends `(min)`/`(max)` at a limit (`Y` prints the current value).
 > See the *Known issues → triggered-capture drift* note in `README.md`.
 
 ## ROI crop (what the CNN sees)
@@ -81,7 +80,12 @@ the digit centre on the preview; the values print below (`DX +1.2`, `DY -0.4`).
 
 | Key | Action |
 |-----|--------|
-| `A` | auto-target on/off — once per revolution, the mean **dx** of that revolution steps the strobe `target` toward centring (1 count per 0.5 px, max 5, deadband 0.5 px). Needs `S` armed and `F` on. The **TGT** gauge reads **AUTO** while it runs. |
+| `A` | auto-target on/off — once per revolution, the mean **dx** of that revolution steps the strobe `target` toward centring (1 count per 0.5 px, max 5, deadband 0.5 px; dx > 0 raises target, wrapping around 0..max). Can only be turned on while `S` is armed and `F` is on, and switches itself off if either is turned off. The **TGT** gauge reads **AUTO** while it runs. |
+
+> **Camera watchdog.** With the strobe armed and FSIN on, if the disc turns 3 revolutions without a
+> completed frame, the OV9281 is assumed locked up and is reset and re-configured automatically
+> (`cam: WATCHDOG #n ...` on the console, with the last auto target change for diagnosis). Each
+> auto-target step is logged as `auto: mean dx=... -> target a->b [WRAP] (rev r pos p)`.
 
 If the loop walks `target` the wrong way (e.g. after `r` reversed the motor), flip
 `DX_TARGET_SIGN` in `main.c`. The verbose line (`v`) adds `DX=… DY=… AUTO=…`; recorded

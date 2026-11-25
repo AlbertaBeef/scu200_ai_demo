@@ -27,8 +27,13 @@
 
 // ---- engine geometry (conv2..conv4 share one MAC array) ----
 #define WIC     8                   // int8 channels packed per 64-bit word
-#define LANES   32                  // output-channel lanes (x WIC MACs each per cycle)
-#define LW_N    (9*(C1/WIC) + 9*(C2/WIC) + 9*(C3/WIC))   // 63 weight words per lane
+#define LANES   16                  // output-channel lanes (x WIC MACs each per cycle)
+// per-lane weight words: conv2 (1 oc group) + conv3 (2 groups) + conv4 (2 groups) = 9+36+72 = 117
+#define LW_N    (9*(C1/WIC)*(C2/LANES) + 9*(C2/WIC)*(C3/LANES) + 9*(C3/WIC)*(C4/LANES))
+#define LW_OFF2 0
+#define LW_OFF3 (9*(C1/WIC)*(C2/LANES))                 // 9
+#define LW_OFF4 (LW_OFF3 + 9*(C2/WIC)*(C3/LANES))       // 45
+#define LB_N    5                   // per-lane biases: c2, c3 grp0/1, c4 grp0/1
 #define FC_WORDS (FC_IN/WIC)        // 196 words per FC row
 
 // ---- weight-blob offsets (int8 elements; trainer order w[oc][ic][kh][kw], fc[row][h][w][c]) ----

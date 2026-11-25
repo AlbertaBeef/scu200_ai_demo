@@ -22,9 +22,10 @@
 //           112x112 result is written back to img (for the HDMI preview / gallery). With
 //           CTRL_SRC_IMG the input is read from img instead (testbench / self-test).
 //   conv1   one pixel per clock: 3x3 window from 3 row-banks, 8 oc x 9 taps in parallel.
-//   conv2-4 ONE shared engine (ALLOCATION limit=1): LANES=32 output lanes x 8 input channels
-//           (one 64-bit word) per clock = 256 MAC/clk. For conv2 (16 oc) lanes 16..31 compute
-//           the neighbouring conv column of the same 2x2 pool window, so the array stays full.
+//   conv2-4 ONE shared engine (ALLOCATION limit=1): LANES=16 output lanes x 8 input channels
+//           (one 64-bit word) per clock = 128 MAC/clk (2 MACs per DSP). conv3/conv4 (32 oc) run
+//           two 16-oc groups per pooled pixel. (32 lanes fit the core but pushed the full
+//           demo03 design to 94% LUTs and failed timing in the DDR/MIPI domains.)
 //   fc      8 MAC/clk (one feature word per clock).
 //
 // Storage: weights + params load from DDR only when CTRL_RELOAD is set (static on-chip stores
@@ -100,31 +101,36 @@ static void xin_write(i8 xb0[XB_N], i8 xb1[XB_N], i8 xb2[XB_N], int bank, int ad
 
 // ------------------------------------------------------------------------------- weights
 static void load_weights(const i8* wblob, const i32* pblob,
-                         i8 c1w[C1][9], i32 c1b[C1], w64 lw[LANES][LW_N], i32 lb[LANES][3],
+                         i8 c1w[C1][9], i32 c1b[C1], w64 lw[LANES][LW_N], i32 lb[LANES][LB_N],
                          w64 uram_fcw[FC_OUT * FC_WORDS], i32 fcb[FC_OUT], i32 Mq[4], i32 Sq[4])
 {
     for (int i = 0; i < C1 * 9; i++) c1w[i / 9][i % 9] = wblob[OFF_C1W + i];
     for (int i = 0; i < C1; i++) c1b[i] = pblob[OFF_C1B + i];
     for (int l = 0; l < LANES; l++) {
-        lb[l][0] = pblob[OFF_C2B + (l & (C2 - 1))];
+        lb[l][0] = pblob[OFF_C2B + l];
         lb[l][1] = pblob[OFF_C3B + l];
-        lb[l][2] = pblob[OFF_C4B + l];
+        lb[l][2] = pblob[OFF_C3B + LANES + l];
+        lb[l][3] = pblob[OFF_C4B + l];
+        lb[l][4] = pblob[OFF_C4B + LANES + l];
     }
     for (int i = 0; i < FC_CLS; i++) fcb[i] = pblob[OFF_FCB + i];
     for (int i = 0; i < FC_POS; i++) fcb[FC_CLS + i] = pblob[OFF_POSB + i];
     for (int i = 0; i < 4; i++) { Mq[i] = pblob[OFF_M + 2 * i]; Sq[i] = pblob[OFF_M + 2 * i + 1]; }
 
-    // conv2..conv4 -> per-lane word stores: word (woff + tap*ICG + g) of lane l packs
-    // ic = g*8..g*8+7 of oc (l, or l&15 for conv2 so lanes 16..31 duplicate 0..15). Each word is
-    // assembled from 8 (strided) blob bytes, then written once: no read-modify-write over the
-    // 32 lane banks. Reload-only path, so the scattered DDR reads do not matter.
+    // conv2..conv4 -> per-lane word stores: word (woff + (ocg*9 + tap)*ICG + g) of lane l packs
+    // ic = g*8..g*8+7 of oc = ocg*16 + l. Each word is assembled from 8 (strided) blob bytes,
+    // then written once: no read-modify-write over the lane banks. Reload-only path, so the
+    // scattered DDR reads do not matter.
     for (int L = 0; L < 3; L++) {
         const int IC   = (L == 0) ? C1 : (L == 1) ? C2 : C3;
+        const int OC   = (L == 0) ? C2 : (L == 1) ? C3 : C4;
         const int off  = (L == 0) ? OFF_C2W : (L == 1) ? OFF_C3W : OFF_C4W;
-        const int woff = (L == 0) ? 0 : (L == 1) ? 9 * (C1 / WIC) : 9 * (C1 / WIC) + 9 * (C2 / WIC);
+        const int lwo  = (L == 0) ? LW_OFF2 : (L == 1) ? LW_OFF3 : LW_OFF4;
         const int ICG  = IC / WIC;
+        for (int og = 0; og < OC / LANES; og++)
         for (int l = 0; l < LANES; l++) {
-            const int oc = (L == 0) ? (l & (C2 - 1)) : l;
+            const int oc = og * LANES + l;
+            const int woff = lwo + og * 9 * ICG;
             for (int t = 0; t < 9; t++) {
                 for (int g = 0; g < ICG; g++) {
 #pragma HLS LOOP_TRIPCOUNT min=1 max=4
@@ -305,51 +311,43 @@ static void conv1(const i8 xb0[XB_N], const i8 xb1[XB_N], const i8 xb2[XB_N],
 
 // ------------------------------------------------------------------------------- conv2..4
 // Shared engine. Input map src: H x H x (ICG*8) as words [(h*H + w)*ICG + g]. Iterates pooled
-// outputs (ph,pw) -> conv positions in the 2x2 window -> 9 taps -> ICG channel words, one word
-// per clock into all LANES lanes. oc16: lanes 0..15 = col 2pw, lanes 16..31 = col 2pw+1 (same oc),
-// so a pooled output takes 2 positions (dy) instead of 4. Pooled words are queued and written
-// one per clock while the next window computes.
+// outputs (ph,pw) -> oc groups (OCG x 16 oc) -> conv positions in the 2x2 window -> 9 taps ->
+// ICG channel words, one word per clock into all LANES lanes. Each finished group yields two
+// output words, queued and written one per clock while the next group computes. Output map:
+// PH x PH x (OCG*16) as words [(ph*PH + pw)*OCG*2 + ocg*2 + k].
 static void engine(const w64 src[FM_N], w64 dst[FM_N], const w64 lw[LANES][LW_N],
-                   const i32 lb[LANES][3], int H, int ICG, bool oc16, int woff,
-                   i32 M0, i32 sh, int li)
+                   const i32 lb[LANES][LB_N], int H, int ICG, int OCG, int woff,
+                   i32 M0, i32 sh, int lbase)
 {
-    const int PH   = H >> 1;
-    const int NPOS = oc16 ? 2 : 4;
-    const int NW   = oc16 ? 2 : 4;              // output words per pooled pixel
-    const int TOTAL = PH * PH * NPOS * 9 * ICG;
+    const int PH    = H >> 1;
+    const int NPOS  = 4;
+    const int TOTAL = PH * PH * OCG * NPOS * 9 * ICG;
 
     i32 acc[LANES], mx[LANES];
 #pragma HLS ARRAY_PARTITION variable=acc complete
 #pragma HLS ARRAY_PARTITION variable=mx complete
-    w64 pend[4];
+    w64 pend[2];
 #pragma HLS ARRAY_PARTITION variable=pend complete
     for (int l = 0; l < LANES; l++) {
 #pragma HLS UNROLL
         acc[l] = 0; mx[l] = -2147483647;
     }
     int npend = 0, paddr = 0;
-    int ph = 0, pw = 0, p = 0, t = 0, kh = 0, kw = 0, g = 0;
+    int ph = 0, pw = 0, og = 0, p = 0, t = 0, kh = 0, kw = 0, g = 0;
 
     for (int i = 0; i < TOTAL; i++) {
 #pragma HLS PIPELINE II=1
-#pragma HLS LOOP_TRIPCOUNT min=7056 max=14112
-        const int dy = oc16 ? p : (p >> 1);
-        const int dx = oc16 ? 0 : (p & 1);
-        const int r  = 2 * ph + dy + kh - 1;
-        const int ca = 2 * pw + dx + kw - 1;
-        const int cb = ca + 1;
-        const bool rv = (r >= 0) && (r < H);
-        const bool va = rv && (ca >= 0) && (ca < H);
-        const bool vb = oc16 && rv && (cb >= 0) && (cb < H);
-        const w64 xa = va ? src[(r * H + ca) * ICG + g] : (w64)0;
-        const w64 xb = vb ? src[(r * H + cb) * ICG + g] : (w64)0;
-        const int widx = woff + t * ICG + g;
+#pragma HLS LOOP_TRIPCOUNT min=14112 max=28224
+        const int r  = 2 * ph + (p >> 1) + kh - 1;
+        const int c  = 2 * pw + (p & 1) + kw - 1;
+        const bool v = (r >= 0) && (r < H) && (c >= 0) && (c < H);
+        const w64 x  = v ? src[(r * H + c) * ICG + g] : (w64)0;
+        const int widx = woff + (og * 9 + t) * ICG + g;
         const bool last_tap = (t == 8) && (g == ICG - 1);
         const bool last_pos = last_tap && (p == NPOS - 1);
 
         for (int l = 0; l < LANES; l += 2) {
 #pragma HLS UNROLL
-            const w64 x = (oc16 && l >= C2) ? xb : xa;   // lanes l, l+1 share x (same half)
             i32 s0, s1;
             dot8x2(x, lw[l][widx], lw[l + 1][widx], s0, s1);
             const i32 a0 = acc[l] + s0, a1 = acc[l + 1] + s1;
@@ -362,11 +360,10 @@ static void engine(const w64 src[FM_N], w64 dst[FM_N], const w64 lw[LANES][LW_N]
 #pragma HLS ARRAY_PARTITION variable=q complete
             for (int l = 0; l < LANES; l++) {
 #pragma HLS UNROLL
-                const i32 m = (oc16 && l < C2) ? imax(mx[l], mx[l + C2]) : mx[l];
-                q[l] = requant(m, lb[l][li], M0, sh, true);
+                q[l] = requant(mx[l], lb[l][lbase + og], M0, sh, true);
                 mx[l] = -2147483647;
             }
-            for (int k = 0; k < 4; k++) {
+            for (int k = 0; k < 2; k++) {
 #pragma HLS UNROLL
                 w64 w = 0;
                 for (int b = 0; b < WIC; b++) {
@@ -375,15 +372,15 @@ static void engine(const w64 src[FM_N], w64 dst[FM_N], const w64 lw[LANES][LW_N]
                 }
                 pend[k] = w;
             }
-            npend = NW;
-            paddr = (ph * PH + pw) * NW;
+            npend = 2;
+            paddr = ((ph * PH + pw) * OCG + og) * 2;
         } else if (npend > 0) {
             dst[paddr] = pend[0];
-            pend[0] = pend[1]; pend[1] = pend[2]; pend[2] = pend[3];
+            pend[0] = pend[1];
             ++paddr; --npend;
         }
 
-        // counters: g -> (kh,kw)/t -> p -> pw -> ph
+        // counters: g -> (kh,kw)/t -> p -> og -> pw -> ph
         if (++g == ICG) {
             g = 0;
             if (++kw == 3) { kw = 0; ++kh; }
@@ -391,12 +388,15 @@ static void engine(const w64 src[FM_N], w64 dst[FM_N], const w64 lw[LANES][LW_N]
                 t = 0; kh = 0; kw = 0;
                 if (++p == NPOS) {
                     p = 0;
-                    if (++pw == PH) { pw = 0; ++ph; }
+                    if (++og == OCG) {
+                        og = 0;
+                        if (++pw == PH) { pw = 0; ++ph; }
+                    }
                 }
             }
         }
     }
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < 2; k++) {
 #pragma HLS PIPELINE II=1
         if (k < npend) dst[paddr + k] = pend[k];
     }
@@ -468,7 +468,7 @@ void mbdpu03(const i8* wblob, const i32* pblob, i8* img, i32* out,
 #pragma HLS ARRAY_PARTITION variable=c1b complete
     static w64 lw[LANES][LW_N];
 #pragma HLS ARRAY_PARTITION variable=lw complete dim=1
-    static i32 lb[LANES][3];
+    static i32 lb[LANES][LB_N];
 #pragma HLS ARRAY_PARTITION variable=lb complete dim=1
     static w64 uram_fcw[FC_OUT * FC_WORDS];
 #pragma HLS bind_storage variable=uram_fcw type=ram_2p impl=bram
@@ -491,11 +491,11 @@ void mbdpu03(const i8* wblob, const i32* pblob, i8* img, i32* out,
     else load_cam(cam, stride, x0, y0, blk_shift, (ctrl & CTRL_INVERT) != 0, img, xb0, xb1, xb2);
 
     conv1(xb0, xb1, xb2, c1w, c1b, Mq[0], Sq[0], uram_fm0);
-    engine(uram_fm0, uram_fm1, lw, lb, P1, C1 / WIC, true, 0,
+    engine(uram_fm0, uram_fm1, lw, lb, P1, C1 / WIC, C2 / LANES, LW_OFF2,
            Mq[1], Sq[1], 0);                                               // 56x56x8  -> 28x28x16
-    engine(uram_fm1, uram_fm0, lw, lb, P2, C2 / WIC, false, 9 * (C1 / WIC),
+    engine(uram_fm1, uram_fm0, lw, lb, P2, C2 / WIC, C3 / LANES, LW_OFF3,
            Mq[2], Sq[2], 1);                                               // 28x28x16 -> 14x14x32
-    engine(uram_fm0, uram_fm1, lw, lb, P3, C3 / WIC, false, 9 * (C1 / WIC) + 9 * (C2 / WIC),
-           Mq[3], Sq[3], 2);                                               // 14x14x32 -> 7x7x32
+    engine(uram_fm0, uram_fm1, lw, lb, P3, C3 / WIC, C4 / LANES, LW_OFF4,
+           Mq[3], Sq[3], 3);                                               // 14x14x32 -> 7x7x32
     fc(uram_fm1, uram_fcw, fcb, out);
 }

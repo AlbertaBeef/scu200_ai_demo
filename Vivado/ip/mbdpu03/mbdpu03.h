@@ -70,7 +70,7 @@ typedef int8_t       i8;
 typedef int32_t      i32;
 typedef ap_uint<64>  w64;
 
-void mbdpu03(const i8* wblob, const i32* pblob, i8* img, i32* out,
+void mbdpu03(const i8* wblob, const i32* pblob, w64* img, i32* out,
              const w64* cam, uint32_t stride, uint32_t x0, uint32_t y0,
              uint32_t blk_shift, uint32_t ctrl);
 

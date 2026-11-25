@@ -17,11 +17,15 @@
 // trainer, which requantises first and pools after.
 //
 // Datapath:
-//   input   camera frame (RGB8, mono R=G=B) -> crop (x0,y0), zoom blk = 1<<blk_shift (crop 112/
-//           224/448, blk x blk box average), luma = G byte, >>1 to 0..127, optional invert. The
-//           112x112 result is written back to img (for the HDMI preview / gallery). With
-//           CTRL_SRC_IMG the input is read from img instead (testbench / self-test).
-//   conv1   one pixel per clock: 3x3 window from 3 row-banks, 8 oc x 9 taps in parallel.
+//   input   DATAFLOW with conv1, three processes linked by FIFOs:
+//           rd_rows  bursts each crop row (64-bit words) from the camera frame into a FIFO; it
+//                    runs ahead of the extractor, so row n+1 is fetched while row n is used;
+//           extract  takes the G byte (= luma, mono R=G=B), box-averages blk x blk (blk =
+//                    1<<blk_shift, crop 112/224/448), >>1 to 0..127, optional invert, and
+//                    streams 112x112 pixels on (plus a copy for the DDR preview write-back);
+//           conv1s   starts as soon as pixels arrive.
+//           With CTRL_SRC_IMG the 112x112 input is read from img instead (testbench / self-test).
+//   conv1   one pixel per clock: 3x3 window from two line buffers, 8 oc x 9 taps in parallel.
 //   conv2-4 ONE shared engine (ALLOCATION limit=1): LANES=16 output lanes x 8 input channels
 //           (one 64-bit word) per clock = 128 MAC/clk (2 MACs per DSP). conv3/conv4 (32 oc) run
 //           two 16-oc groups per pooled pixel. (32 lanes fit the core but pushed the full
@@ -35,10 +39,10 @@
 // exported RTL of every uram_* memory is patched to UltraRAM by run_hls.tcl (patch_uram.py).
 
 #include "mbdpu03.h"
+#include <hls_stream.h>
 
 #define FM_N   4096                 // words per feature-map bank (p1 = 56*56*1 = 3136 max)
-#define XB_N   (38*IN_DIM)          // bytes per input row-bank (row r -> bank r%3, row r/3)
-#define ROWW_N 170                  // camera row words (448*3 B + 7 B misalignment) / 8
+#define IMG_W  (IMG_N/8)            // 1568 64-bit words in the 112x112 input image
 
 // ------------------------------------------------------------------------------- helpers
 static i8 requant(i32 acc, i32 bias, i32 M0, int shift, bool relu)
@@ -92,12 +96,6 @@ static void dot8x2(w64 x, w64 wa, w64 wb, i32 &sa, i32 &sb)
 }
 
 static inline i32 imax(i32 a, i32 b) { return a > b ? a : b; }
-
-static void xin_write(i8 xb0[XB_N], i8 xb1[XB_N], i8 xb2[XB_N], int bank, int addr, i8 v)
-{
-#pragma HLS INLINE
-    if (bank == 0) xb0[addr] = v; else if (bank == 1) xb1[addr] = v; else xb2[addr] = v;
-}
 
 // ------------------------------------------------------------------------------- weights
 static void load_weights(const i8* wblob, const i32* pblob,
@@ -157,77 +155,107 @@ static void load_weights(const i8* wblob, const i32* pblob,
 }
 
 // ------------------------------------------------------------------------------- input
-static void load_img(const i8* img, i8 xb0[XB_N], i8 xb1[XB_N], i8 xb2[XB_N])
+// Row geometry shared by the reader and the extractor: first word, byte offset, word count.
+static void row_geom(uint32_t cy, uint32_t stride, uint32_t x0, uint32_t y0, uint32_t crop,
+                     bool src_img, uint32_t& w0, uint32_t& off, uint32_t& nw)
 {
-    int oy = 0, ox = 0, bank = 0, brow = 0;
-    for (int i = 0; i < IMG_N; i++) {
+#pragma HLS INLINE
+    if (src_img) { w0 = cy * (IN_DIM / 8); off = 0; nw = IN_DIM / 8; return; }
+    const uint32_t start = (y0 + cy) * stride + x0 * 3u;
+    w0 = start >> 3; off = start & 7u; nw = (off + crop * 3u + 7u) >> 3;
+}
+
+// Stage A: one burst per crop row into the word FIFO.
+static void rd_rows(const w64* cam, const w64* img, uint32_t stride, uint32_t x0, uint32_t y0,
+                    uint32_t bs, bool src_img, hls::stream<w64>& ws)
+{
+    const uint32_t crop = (uint32_t)IN_DIM << bs;
+    for (uint32_t cy = 0; cy < crop; cy++) {
+#pragma HLS LOOP_TRIPCOUNT min=112 max=448
+        uint32_t w0, off, nw;
+        row_geom(cy, stride, x0, y0, crop, src_img, w0, off, nw);
+        if (src_img) {
+            for (uint32_t j = 0; j < nw; j++) {
 #pragma HLS PIPELINE II=1
-        xin_write(xb0, xb1, xb2, bank, brow * IN_DIM + ox, img[i]);
-        if (++ox == IN_DIM) {
-            ox = 0; ++oy;
-            if (++bank == 3) { bank = 0; ++brow; }
+#pragma HLS LOOP_TRIPCOUNT min=14 max=14
+                ws.write(img[w0 + j]);
+            }
+        } else {
+            for (uint32_t j = 0; j < nw; j++) {
+#pragma HLS PIPELINE II=1
+#pragma HLS LOOP_TRIPCOUNT min=42 max=169
+                ws.write(cam[w0 + j]);
+            }
         }
     }
 }
 
-static void load_cam(const w64* cam, uint32_t stride, uint32_t x0, uint32_t y0, uint32_t bs,
-                     bool inv, i8* img, i8 xb0[XB_N], i8 xb1[XB_N], i8 xb2[XB_N])
+// Stage B: one crop pixel per clock. Each crop pixel needs at most one new word (3 bytes per
+// pixel < 8 per word), so the word FIFO is consumed on the fly; leftover words are drained.
+static void extract(uint32_t stride, uint32_t x0, uint32_t y0, uint32_t bs, bool src_img,
+                    bool inv, hls::stream<w64>& ws, hls::stream<i8>& ps, i8 imgbuf[IMG_N])
 {
-    if (bs > BLK_SHIFT_MAX) bs = BLK_SHIFT_MAX;
     const uint32_t crop = (uint32_t)IN_DIM << bs;
     const uint32_t mask = (1u << bs) - 1u;
     const uint32_t ash  = bs << 1;                       // / (blk*blk)
+    const uint32_t step = src_img ? 1u : 3u;             // bytes per crop pixel
+    const uint32_t pofs = src_img ? 0u : 1u;             // green byte of RGB8
 
-    w64 roww[ROWW_N];
     uint32_t acc[IN_DIM];
-    int oy = 0, bank = 0, brow = 0;
-
+    int oy = 0;
     for (uint32_t cy = 0; cy < crop; cy++) {
 #pragma HLS LOOP_TRIPCOUNT min=112 max=448
-        const uint32_t start = (y0 + cy) * stride + x0 * 3u;
-        const uint32_t w0 = start >> 3, off = start & 7u;
-        const uint32_t nw = (off + crop * 3u + 7u) >> 3;
-        for (uint32_t j = 0; j < nw; j++) {
-#pragma HLS PIPELINE II=1
-#pragma HLS LOOP_TRIPCOUNT min=42 max=169
-            roww[j] = cam[w0 + j];
-        }
+        uint32_t w0, off, nw;
+        row_geom(cy, stride, x0, y0, crop, src_img, w0, off, nw);
+        w64 cur = ws.read();
+        uint32_t have = 1;                               // words taken from this row so far
+        if (((off + pofs) >> 3) != 0) { cur = ws.read(); have = 2; }
         const bool first = (cy & mask) == 0, last = (cy & mask) == mask;
         uint32_t run = 0;
         for (uint32_t cx = 0; cx < crop; cx++) {
 #pragma HLS PIPELINE II=1
 #pragma HLS LOOP_TRIPCOUNT min=112 max=448
 #pragma HLS DEPENDENCE variable=acc inter false
-            const uint32_t b = off + cx * 3u + 1u;       // green byte == luma (mono)
-            const uint32_t g = roww[b >> 3].range(8 * (b & 7) + 7, 8 * (b & 7));
+            const uint32_t b = off + cx * step + pofs;
+            if ((b >> 3) >= have) { cur = ws.read(); ++have; }
+            const uint32_t g = cur.range(8 * (b & 7) + 7, 8 * (b & 7));
             run += g;
             if ((cx & mask) == mask) {
                 const uint32_t ox  = cx >> bs;
                 const uint32_t tot = (first ? 0u : acc[ox]) + run;
                 run = 0;
                 if (last) {
-                    int q = (int)((tot >> ash) >> 1);      // box average, 0..255 -> 0..127
-                    if (inv) q = 127 - q;
-                    xin_write(xb0, xb1, xb2, bank, brow * IN_DIM + (int)ox, (i8)q);
-                    img[oy * IN_DIM + (int)ox] = (i8)q;
+                    i8 q;
+                    if (src_img) q = (i8)g;
+                    else {
+                        int v = (int)((tot >> ash) >> 1);  // box average, 0..255 -> 0..127
+                        if (inv) v = 127 - v;
+                        q = (i8)v;
+                    }
+                    ps.write(q);
+                    imgbuf[oy * IN_DIM + (int)ox] = q;
                 } else {
                     acc[ox] = tot;
                 }
             }
         }
-        if (last) {
-            ++oy;
-            if (++bank == 3) { bank = 0; ++brow; }
+        for (; have < nw; ++have) {                      // unused tail word(s) of this row
+#pragma HLS LOOP_TRIPCOUNT min=0 max=1
+            ws.read();
         }
+        if (last) ++oy;
     }
 }
 
 // ------------------------------------------------------------------------------- conv1
-// One conv pixel per clock over r=0..111, c=0..112 (one flush column). Window column c enters
-// on the right; the conv output for column c-1 is formed and 2x2 max-pooled on the fly.
-static void conv1(const i8 xb0[XB_N], const i8 xb1[XB_N], const i8 xb2[XB_N],
-                  const i8 c1w[C1][9], const i32 c1b[C1], i32 M0, i32 sh, w64 dst[FM_N])
+// Stage C: one step per clock over input rows ir = 0..112 and columns c = 0..112 (one flush
+// row/column of zero padding). Two line buffers hold rows ir-2, ir-1; with the incoming pixel
+// they form window column c of conv row r = ir-1. The conv output for column c-1 is formed and
+// 2x2 max-pooled on the fly, so conv1 trails the pixel stream by one row.
+static void conv1s(hls::stream<i8>& ps, const i8 c1w[C1][9], const i32 c1b[C1], i32 M0, i32 sh,
+                   w64 dst[FM_N])
 {
+    i8  lb0[IN_DIM], lb1[IN_DIM];
     i8  win[3][3];
 #pragma HLS ARRAY_PARTITION variable=win complete dim=0
     i32 colmax[C1];
@@ -235,25 +263,19 @@ static void conv1(const i8 xb0[XB_N], const i8 xb1[XB_N], const i8 xb2[XB_N],
     i32 rowbuf[P1][C1];
 #pragma HLS ARRAY_PARTITION variable=rowbuf complete dim=2
 
-    int r = 0, c = 0;
-    int rb = 0, rrow = 0;            // bank of row r (r % 3) and its row inside the bank (r / 3)
-    for (int i = 0; i < IN_DIM * (IN_DIM + 1); i++) {
+    int ir = 0, c = 0;
+    for (int i = 0; i < (IN_DIM + 1) * (IN_DIM + 1); i++) {
 #pragma HLS PIPELINE II=1
-        // rows r-1, r, r+1 live in three different banks (row % 3); read each bank once.
-        // Bank j holds window row k = (j - rb + 1) mod 3, i.e. image row r-1+k.
-        i8 col[3];
+        const int r = ir - 1;
+        i8 col[3] = {0, 0, 0};
 #pragma HLS ARRAY_PARTITION variable=col complete
-        for (int j = 0; j < 3; j++) {
-#pragma HLS UNROLL
-            int k = j - rb + 1;  if (k < 0) k += 3;  if (k > 2) k -= 3;
-            const int s   = rb + k - 1;                         // -1..3: bank index before wrap
-            const int brr = rrow + (s < 0 ? -1 : (s > 2 ? 1 : 0));
-            const int row = r - 1 + k;
-            const bool ok = (row >= 0) && (row < IN_DIM) && (c < IN_DIM);
-            const int a = brr * IN_DIM + c;
-            i8 x = 0;
-            if (ok) x = (j == 0) ? xb0[a] : (j == 1) ? xb1[a] : xb2[a];
-            col[k] = x;
+        if (c < IN_DIM) {
+            const i8 a = (ir >= 2) ? lb0[c] : (i8)0;     // row ir-2
+            const i8 m = (ir >= 1) ? lb1[c] : (i8)0;     // row ir-1
+            i8 p = 0;
+            if (ir < IN_DIM) p = ps.read();              // row ir (row 112 = padding)
+            lb0[c] = m; lb1[c] = p;
+            col[0] = a; col[1] = m; col[2] = p;
         }
         for (int k = 0; k < 3; k++) {
 #pragma HLS UNROLL
@@ -261,7 +283,7 @@ static void conv1(const i8 xb0[XB_N], const i8 xb1[XB_N], const i8 xb2[XB_N],
             else        { win[k][0] = win[k][1]; win[k][1] = win[k][2]; }
             win[k][2] = col[k];
         }
-        if (c >= 1) {
+        if (r >= 0 && c >= 1) {
             const int cc = c - 1;
             w64 word = 0;
             ap_int<8> xv[9];
@@ -302,11 +324,23 @@ static void conv1(const i8 xb0[XB_N], const i8 xb1[XB_N], const i8 xb2[XB_N],
             }
             if ((cc & 1) && (r & 1)) dst[(r >> 1) * P1 + (cc >> 1)] = word;
         }
-        if (++c == IN_DIM + 1) {
-            c = 0; ++r;
-            if (++rb == 3) { rb = 0; ++rrow; }
-        }
+        if (++c == IN_DIM + 1) { c = 0; ++ir; }
     }
+}
+
+// Input + conv1 as one dataflow region: the camera read overlaps conv1.
+static void front(const w64* cam, const w64* img, uint32_t stride, uint32_t x0, uint32_t y0,
+                  uint32_t bs, bool src_img, bool inv, const i8 c1w[C1][9], const i32 c1b[C1],
+                  i32 M0, i32 sh, w64 dst[FM_N], i8 imgbuf[IMG_N])
+{
+#pragma HLS DATAFLOW
+    hls::stream<w64> ws("ws");
+#pragma HLS STREAM variable=ws depth=512
+    hls::stream<i8> ps("ps");
+#pragma HLS STREAM variable=ps depth=256
+    rd_rows(cam, img, stride, x0, y0, bs, src_img, ws);
+    extract(stride, x0, y0, bs, src_img, inv, ws, ps, imgbuf);
+    conv1s(ps, c1w, c1b, M0, sh, dst);
 }
 
 // ------------------------------------------------------------------------------- conv2..4
@@ -439,13 +473,13 @@ static void fc(const w64 src[FM_N], const w64 uram_fcw[FC_OUT * FC_WORDS], const
 }
 
 // ------------------------------------------------------------------------------- top
-void mbdpu03(const i8* wblob, const i32* pblob, i8* img, i32* out,
+void mbdpu03(const i8* wblob, const i32* pblob, w64* img, i32* out,
              const w64* cam, uint32_t stride, uint32_t x0, uint32_t y0,
              uint32_t blk_shift, uint32_t ctrl)
 {
 #pragma HLS INTERFACE m_axi     port=wblob offset=slave bundle=gmem depth=33864
 #pragma HLS INTERFACE m_axi     port=pblob offset=slave bundle=gmem depth=110
-#pragma HLS INTERFACE m_axi     port=img   offset=slave bundle=gmem depth=12544
+#pragma HLS INTERFACE m_axi     port=img   offset=slave bundle=gmem depth=1568
 #pragma HLS INTERFACE m_axi     port=out   offset=slave bundle=gmem depth=13
 #pragma HLS INTERFACE m_axi     port=cam   offset=slave bundle=gmem depth=115200 max_read_burst_length=256
 #pragma HLS INTERFACE s_axilite port=wblob     bundle=control
@@ -479,7 +513,8 @@ void mbdpu03(const i8* wblob, const i32* pblob, i8* img, i32* out,
 #pragma HLS ARRAY_PARTITION variable=Sq complete
 
     // ---- per-call buffers ----
-    static i8  xb0[XB_N], xb1[XB_N], xb2[XB_N];
+    static i8  imgbuf[IMG_N];
+#pragma HLS ARRAY_PARTITION variable=imgbuf cyclic factor=8
     static w64 uram_fm0[FM_N], uram_fm1[FM_N];
 #pragma HLS bind_storage variable=uram_fm0 type=ram_2p impl=bram
 #pragma HLS bind_storage variable=uram_fm1 type=ram_2p impl=bram
@@ -487,10 +522,22 @@ void mbdpu03(const i8* wblob, const i32* pblob, i8* img, i32* out,
     if (ctrl & CTRL_RELOAD)
         load_weights(wblob, pblob, c1w, c1b, lw, lb, uram_fcw, fcb, Mq, Sq);
 
-    if (ctrl & CTRL_SRC_IMG) load_img(img, xb0, xb1, xb2);
-    else load_cam(cam, stride, x0, y0, blk_shift, (ctrl & CTRL_INVERT) != 0, img, xb0, xb1, xb2);
-
-    conv1(xb0, xb1, xb2, c1w, c1b, Mq[0], Sq[0], uram_fm0);
+    const bool src_img = (ctrl & CTRL_SRC_IMG) != 0;
+    uint32_t bs = blk_shift > BLK_SHIFT_MAX ? (uint32_t)BLK_SHIFT_MAX : blk_shift;
+    if (src_img) bs = 0;
+    front(cam, img, stride, x0, y0, bs, src_img, (ctrl & CTRL_INVERT) != 0, c1w, c1b,
+          Mq[0], Sq[0], uram_fm0, imgbuf);
+    if (!src_img) {                                       // 112x112 input -> DDR, for the preview
+        for (int i = 0; i < IMG_W; i++) {
+#pragma HLS PIPELINE II=1
+            w64 w;
+            for (int k = 0; k < 8; k++) {
+#pragma HLS UNROLL
+                w.range(8 * k + 7, 8 * k) = (ap_uint<8>)(uint8_t)imgbuf[i * 8 + k];
+            }
+            img[i] = w;
+        }
+    }
     engine(uram_fm0, uram_fm1, lw, lb, P1, C1 / WIC, C2 / LANES, LW_OFF2,
            Mq[1], Sq[1], 0);                                               // 56x56x8  -> 28x28x16
     engine(uram_fm1, uram_fm0, lw, lb, P2, C2 / WIC, C3 / LANES, LW_OFF3,

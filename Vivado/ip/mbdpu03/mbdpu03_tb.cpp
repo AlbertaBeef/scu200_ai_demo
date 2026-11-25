@@ -123,7 +123,11 @@ static void rand_model(unsigned seed)
 
 static void run_hw(uint32_t ctrl, int x0 = 0, int y0 = 0, int bs = 0)
 {
-    mbdpu03(g_w, g_p, g_img, g_out, g_cam.data(), CAM_W * 3, x0, y0, bs, ctrl);
+    // img is a 64-bit port (8 pixels per word, little-endian, as in DDR)
+    static std::vector<w64> imgw(IMG_N / 8);
+    for (int i = 0; i < IMG_N; i++) imgw[i >> 3].range(8 * (i & 7) + 7, 8 * (i & 7)) = (ap_uint<8>)(uint8_t)g_img[i];
+    mbdpu03(g_w, g_p, imgw.data(), g_out, g_cam.data(), CAM_W * 3, x0, y0, bs, ctrl);
+    for (int i = 0; i < IMG_N; i++) g_img[i] = (i8)(uint8_t)imgw[i >> 3].range(8 * (i & 7) + 7, 8 * (i & 7));
 }
 
 static bool read_file(const std::string& path, void* dst, size_t n)

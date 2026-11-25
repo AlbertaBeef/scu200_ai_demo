@@ -340,27 +340,44 @@ static uint32_t g_frm_min = 255, g_frm_max = 0;   /* TEST probe: brightness rang
  * strobes -> smaller ink-x), so a digit right of centre (dx>0) means the strobe fired early
  * -> raise target (confirmed on the rig: dx > 0 -> increase target). Target wraps within
  * 0..target_max. Flip DX_TARGET_SIGN if the loop runs away (e.g. motor reversed with 'r'). */
-#if defined(XPAR_MBDPU02_S_AXI_CONTROL_BASEADDR) || defined(XPAR_MBDPU02_BASEADDR)
+/* mbdpu03 (scu200_ai_demo03): 112x112 mono input, camera crop/zoom fused into the core (no mbpre),
+ * same position head but dx/dy in 112-px units (4x demo02's), so the loop constants scale by 4. */
+#if defined(XPAR_MBDPU03_S_AXI_CONTROL_BASEADDR) || defined(XPAR_MBDPU03_BASEADDR)
+#define MBDPU03_CORE 1
+#endif
+#if defined(XPAR_MBDPU02_S_AXI_CONTROL_BASEADDR) || defined(XPAR_MBDPU02_BASEADDR) || defined(MBDPU03_CORE)
 #define MBDPU_HAS_POS 1
 #define DX_TARGET_SIGN      (+1)
-#define AUTO_DEADBAND_X100  50    /* |mean dx| <= 0.5 px: leave target alone */
-#define AUTO_STEP_MAX       5     /* counts per revolution (~1.3 px at ~0.26 px/count) */
+#ifdef MBDPU03_CORE
+#define POS_UNIT_X100       200   /* dx per target count step: 2 px (112-px units) */
+#else
+#define POS_UNIT_X100       50    /* dx per target count step: 0.5 px (28-px units) */
+#endif
+#define AUTO_DEADBAND_X100  POS_UNIT_X100   /* |mean dx| <= 1 unit: leave target alone */
+#define AUTO_STEP_MAX       5     /* counts per revolution (~1.3 px at ~0.26 px/count, 28-px units) */
 static int32_t  g_pos_x100[2] = {0, 0};   /* latest dx, dy */
 static int      g_auto_tgt = 0;           /* 'A': dx -> target loop on/off (default off) */
 static int32_t  g_auto_sum = 0;           /* sum of dx over the current revolution */
 static uint32_t g_auto_n   = 0;           /* captures summed */
 #endif
 
-#if defined(XPAR_MBPRE_S_AXI_CONTROL_BASEADDR) || defined(XPAR_MBPRE_BASEADDR)
+#if defined(XPAR_MBPRE_S_AXI_CONTROL_BASEADDR) || defined(XPAR_MBPRE_BASEADDR) || defined(MBDPU03_CORE)
 #define MBPRE_CROP_CTRL 1
+#ifdef MBDPU03_CORE
+#define CROP_DIM       112u                                /* mbdpu03 output side: crop = 112<<shift */
+static uint32_t g_crop_shift = 0;                          /* 112<<0 = 112, 1:1 */
+#define CROP_SHIFT_MAX 2                                   /* blk<=4, crop<=448 */
+#else
+#define CROP_DIM       ((uint32_t)MNIST_DIM)               /* mbpre output side: crop = 28<<shift */
 static uint32_t g_crop_shift = 2;                          /* 28<<2 = 112 */
+#define CROP_SHIFT_MAX 4                                   /* blk<=16, crop<=448 (fits 480 lines) */
+#endif
 static uint32_t g_crop_x0    = (MNIST_FRAME_W - 112) / 2;  /* 264 */
 static uint32_t g_crop_y0    = (MNIST_FRAME_H - 112) / 2;  /* 184 */
-#define CROP_SHIFT_MAX 4                                   /* blk<=16, crop<=448 (fits 480 lines) */
 
 static void mnist_crop_recenter(void)
 {
-    uint32_t crop = (uint32_t)MNIST_DIM << g_crop_shift;
+    uint32_t crop = CROP_DIM << g_crop_shift;
     g_crop_x0 = (MNIST_FRAME_W - crop) / 2u;
     g_crop_y0 = (MNIST_FRAME_H - crop) / 2u;
 }
@@ -371,7 +388,7 @@ static void mnist_crop_recenter(void)
 static int mnist_crop_key(int ch)
 {
     const uint32_t step = 16;
-    uint32_t crop = (uint32_t)MNIST_DIM << g_crop_shift;
+    uint32_t crop = CROP_DIM << g_crop_shift;
     switch (ch) {
     case 'z': if (g_crop_shift > 0)              { g_crop_shift--; mnist_crop_recenter(); } break;
     case 'x': if (g_crop_shift < CROP_SHIFT_MAX) { g_crop_shift++; mnist_crop_recenter(); } break;
@@ -436,7 +453,7 @@ static int mnist_crop_key(int ch)
                 g_frm_min = 255; g_frm_max = 0; } return 1;
     default:  return 0;
     }
-    crop = (uint32_t)MNIST_DIM << g_crop_shift;
+    crop = CROP_DIM << g_crop_shift;
     xil_printf("crop: %lux%lu at (%lu,%lu) blk=%lu\r\n",
                (unsigned long)crop, (unsigned long)crop, (unsigned long)g_crop_x0,
                (unsigned long)g_crop_y0, (unsigned long)(1u << g_crop_shift));
@@ -724,9 +741,19 @@ static void roi_record(uintptr_t cambuf, uint32_t stride, uintptr_t img_src,
 #endif
 	for (int i = 0; i < 10; i++) ((volatile int32_t *)s)[8 + i] = logits[i];   /* logits at +32 */
 
+#ifdef MBDPU03_CORE
+	/* mbdpu03's input is 112x112 (already invalidated after the run): keep the 28x28 field as
+	 * its 4x4 box average so the gallery format stays the same as demo01/02. */
+	{ const int8_t *in = (const int8_t *)img_src; int8_t *o = (int8_t *)(uintptr_t)(s + ROI_SMP_HDR);
+	  for (int oy = 0; oy < 28; oy++) for (int ox = 0; ox < 28; ox++) {
+	      int sum = 0;
+	      for (int dy = 0; dy < 4; dy++) for (int dx = 0; dx < 4; dx++) sum += in[(oy*4 + dy)*112 + ox*4 + dx];
+	      o[oy*28 + ox] = (int8_t)(sum >> 4); } }
+#else
 	Xil_DCacheFlushRange((UINTPTR)img_src, ROI_SMP_IMG);   /* ensure model input is coherent */
 	memcpy((void *)(uintptr_t)(s + ROI_SMP_HDR), (const void *)img_src, ROI_SMP_IMG);
-	mnist_capture_crop112(cambuf, stride, (int)g_crop_x0, (int)g_crop_y0, (int)(28u << g_crop_shift),
+#endif
+	mnist_capture_crop112(cambuf, stride, (int)g_crop_x0, (int)g_crop_y0, (int)(CROP_DIM << g_crop_shift),
 	                      (uint8_t *)(uintptr_t)(s + ROI_SMP_HDR + ROI_SMP_IMG));
 	Xil_DCacheFlushRange(s, ROI_SMP_BYTES);
 
@@ -1761,7 +1788,11 @@ int main() {
 
 /* MBDPU01_BASE = "the DPU": mbdpu02 (demo02, same register map + a position head) when
  * present, else mbdpu01 (demo01). */
-#if defined(XPAR_MBDPU02_S_AXI_CONTROL_BASEADDR)
+#if defined(XPAR_MBDPU03_S_AXI_CONTROL_BASEADDR)
+#  define MBDPU01_BASE   XPAR_MBDPU03_S_AXI_CONTROL_BASEADDR
+#elif defined(XPAR_MBDPU03_BASEADDR)
+#  define MBDPU01_BASE   XPAR_MBDPU03_BASEADDR
+#elif defined(XPAR_MBDPU02_S_AXI_CONTROL_BASEADDR)
 #  define MBDPU01_BASE   XPAR_MBDPU02_S_AXI_CONTROL_BASEADDR
 #elif defined(XPAR_MBDPU02_BASEADDR)
 #  define MBDPU01_BASE   XPAR_MBDPU02_BASEADDR
@@ -1776,14 +1807,18 @@ int main() {
 	 * so retraining needs no rebuild. img is (re)written each classification. */
 #  define MBDPU01_WBLOB  0xB0000000u   /* weights int8[9064] (mbdpu02: [10632]) - JTAG-loaded */
 #  define MBDPU01_PBLOB  0xB0010000u   /* params  int32[38]  (mbdpu02: [42])    - JTAG-loaded */
-#  define MBDPU01_IMG    0xB0020000u   /* 28x28 image - written each frame by preprocess */
+#  define MBDPU01_IMG    0xB0020000u   /* 28x28 image - written each frame by preprocess (mbdpu03: 112x112, written back by the core) */
 #  define MBDPU01_OUT    0xB0030000u   /* result int32[11] (mbdpu02: [13] + dx, dy) */
 #if defined(XPAR_MBPRE_S_AXI_CONTROL_BASEADDR)
 #  define MBPRE_BASE XPAR_MBPRE_S_AXI_CONTROL_BASEADDR
 #elif defined(XPAR_MBPRE_BASEADDR)
 #  define MBPRE_BASE XPAR_MBPRE_BASEADDR   /* preprocessing offloaded to fabric */
 #endif
-#ifdef MBDPU_HAS_POS
+#if defined(MBDPU03_CORE)
+	mnist_set_input_dim(MBDPU03_DIM);
+	xil_printf("mbdpu03 112x112 MNIST classifier + dx/dy position head ready (camera crop in core): "
+	           "ctrl 0x%08x, weights @0x%08x/0x%08x\n\r",
+#elif defined(MBDPU_HAS_POS)
 	xil_printf("mbdpu02 MNIST classifier + dx/dy position head ready: ctrl 0x%08x, "
 	           "weights @0x%08x/0x%08x (inverted-model, invert=0)\n\r",
 #else
@@ -1902,7 +1937,9 @@ int main() {
 #ifdef STATS_ENABLE
 			uint32_t _lt0 = Xil_In32(RT_BASE + RT_TCR);   /* stage-latency stamp: start */
 #endif
-#if defined(MBPRE_BASE)
+#if defined(MBDPU03_CORE)
+			/* No separate preprocess: mbdpu03 crops/zooms the camera frame itself (PRE = 0). */
+#elif defined(MBPRE_BASE)
 			/* Preprocessing OFFLOADED to the fabric (mbpre): camera 640x480 -> 28x28 in
 			 * ~2 ms vs ~17 ms on the soft CPU. Programmable centre crop from the live
 			 * g_crop_* state (x0,y0,blk_shift). cam/img are DDR-resident; mbpre streams
@@ -1929,9 +1966,16 @@ int main() {
 #ifdef STATS_ENABLE
 			uint32_t _lt1 = Xil_In32(RT_BASE + RT_TCR);   /* end mbpre preprocess */
 #endif
-#ifdef MBDPU_HAS_POS
+#if defined(MBDPU03_CORE)
+			int pred = mbdpu03_infer(MBDPU01_BASE, MBDPU01_WBLOB, MBDPU01_PBLOB,
+			                         MBDPU01_IMG, MBDPU01_OUT, (uint64_t)cambuf,
+			                         ActiveCams[0].VideoPipePtr->Frmbuf.FrameStrideBytes,
+			                         g_crop_x0, g_crop_y0, g_crop_shift, logits, g_pos_x100);
+#elif defined(MBDPU_HAS_POS)
 			int pred = mbdpu02_infer(MBDPU01_BASE, MBDPU01_WBLOB, MBDPU01_PBLOB,
 			                         MBDPU01_IMG, MBDPU01_OUT, logits, g_pos_x100);
+#endif
+#ifdef MBDPU_HAS_POS
 			/* Auto-target: average dx over one revolution (N captures) so each printed digit's
 			 * own static offset averages out, then step target toward centring (1 count per
 			 * 0.5 px of mean dx, capped). Only while the strobe drives the camera. */
@@ -1941,7 +1985,7 @@ int main() {
 					int32_t mean_dx = g_auto_sum / (int32_t)g_auto_n;
 					g_auto_sum = 0; g_auto_n = 0;
 					if (mean_dx > AUTO_DEADBAND_X100 || mean_dx < -AUTO_DEADBAND_X100) {
-						int step = (int)(mean_dx / 50) * DX_TARGET_SIGN;
+						int step = (int)(mean_dx / POS_UNIT_X100) * DX_TARGET_SIGN;
 						if (step >  AUTO_STEP_MAX) step =  AUTO_STEP_MAX;
 						if (step < -AUTO_STEP_MAX) step = -AUTO_STEP_MAX;
 						/* Wrap within one strobe period (0..target_max): the fire points are
@@ -2000,7 +2044,7 @@ int main() {
 				roi_record(cambuf, ActiveCams[0].VideoPipePtr->Frmbuf.FrameStrideBytes,
 				           (uintptr_t)MBDPU01_IMG, pred, logits, mean);
 #endif
-#if defined(MBPRE_BASE)
+#if defined(MBPRE_BASE) || defined(MBDPU03_CORE)
 			/* ROI box on the live feed: outline the exact crop mbpre used (tracks pan/zoom).
 			 * Drawn into the just-displayed camera buffer AFTER mbpre consumed it, so the
 			 * classified pixels are untouched; the frame is fresh each capture -> no erase. */
@@ -2008,7 +2052,7 @@ int main() {
 			if (g_hud_on)
 #endif
 			mnist_draw_roi_box(cambuf, ActiveCams[0].VideoPipePtr->Frmbuf.FrameStrideBytes,
-			                   (int)g_crop_x0, (int)g_crop_y0, (int)(28u << g_crop_shift),
+			                   (int)g_crop_x0, (int)g_crop_y0, (int)(CROP_DIM << g_crop_shift),
 			                   0x22E6E6u /*teal, matches the HUD/overlay*/, 4);
 #endif
 #ifdef MNIST_VERBOSE

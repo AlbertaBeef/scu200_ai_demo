@@ -66,6 +66,11 @@ static const uint8_t FONT5x7[10][7] = {
 #define ROI_X    1340           /* ROI preview LEFT of the labels */
 #define ROI_Y    680            /* ~vertically centered against the 10-row bar block */
 #define ROI_S    4              /* 28x28 -> 112x112 ROI preview */
+#define ROI_PX   (MNIST_DIM*ROI_S)  /* preview side on screen: 112 px */
+
+/* Model input side: 28 (mbdpu01/02, preview scaled x4) or 112 (mbdpu03, preview 1:1). */
+static int s_dim = MNIST_DIM;
+void mnist_set_input_dim(int dim) { s_dim = (dim == ROI_PX) ? ROI_PX : MNIST_DIM; }
 
 // Draw the static 0-9 digit labels once (they never change; only the bars update live).
 void mnist_draw_static(uintptr_t fb, uint32_t stride)
@@ -90,15 +95,16 @@ void mnist_draw_static(uintptr_t fb, uint32_t stride)
 // winner highlighted). Bars clear-then-fill so they shrink/grow correctly each frame.
 void mnist_draw_live(uintptr_t fb, uint32_t stride, const int8_t *img28, const int32_t *logits)
 {
-    // ROI preview (row-pointer sequential writes)
-    for (int r = 0; r < MNIST_DIM; r++) {
-        const int8_t *src = &img28[r * MNIST_DIM];
-        for (int dy = 0; dy < ROI_S; dy++) {
-            uint8_t *p = (uint8_t *)(fb + (uintptr_t)(ROI_Y + r*ROI_S + dy)*stride + (uintptr_t)ROI_X*3u);
-            for (int c = 0; c < MNIST_DIM; c++) {
+    // ROI preview (row-pointer sequential writes); s_dim x s_dim input scaled to 112x112
+    const int sc = ROI_PX / s_dim;
+    for (int r = 0; r < s_dim; r++) {
+        const int8_t *src = &img28[r * s_dim];
+        for (int dy = 0; dy < sc; dy++) {
+            uint8_t *p = (uint8_t *)(fb + (uintptr_t)(ROI_Y + r*sc + dy)*stride + (uintptr_t)ROI_X*3u);
+            for (int c = 0; c < s_dim; c++) {
                 int q = src[c];
                 uint8_t g = (uint8_t)(q < 0 ? 0 : (q > 127 ? 255 : q * 2));
-                for (int dx = 0; dx < ROI_S; dx++) { *p++ = g; *p++ = g; *p++ = g; }
+                for (int dx = 0; dx < sc; dx++) { *p++ = g; *p++ = g; *p++ = g; }
             }
         }
     }
@@ -321,7 +327,7 @@ void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
  * tick; "DY"/"-0.4" left of the DY gauge, value right-aligned to it, label over its first digit. Whole box repainted and
  * cache-flushed every call (drawn into the back buffer each capture, like the bars). */
 #define POS_SPAN   (MNIST_DIM*ROI_S)        /* 112 screen px = 28 model px */
-#define POS_PPX    ROI_S                    /* 4 screen px per model px */
+#define POS_PPX    (POS_SPAN / s_dim)       /* screen px per model px: 4 (28 in) or 1 (112 in) */
 #define POS_DX_Y   (ROI_Y + POS_SPAN + 8)   /* DX track top (8 px under the preview) */
 #define POS_DY_X   (ROI_X - 16)             /* DY track left (8 px left of the preview) */
 #define POS_TRK    6                        /* track thickness */
@@ -344,7 +350,7 @@ static void pos_fmt(char *buf, int v_x100)   /* "+1.2" / "-0.4", rounded to 0.1 
 void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100)
 {
     const uint32_t BLACK = 0x000000u, WHITE = 0xF0F4F8u, TEAL = 0x22E6E6u, TRACK = 0x303840u;
-    const int half = POS_SPAN / 2, lim = half * 100 / POS_PPX;     /* +-14.00 px */
+    const int half = POS_SPAN / 2, lim = half * 100 / POS_PPX;     /* +-14.00 / +-56.00 px */
     int dx = dx_x100 > lim ? lim : (dx_x100 < -lim ? -lim : dx_x100);
     int dy = dy_x100 > lim ? lim : (dy_x100 < -lim ? -lim : dy_x100);
     int ox = (dx * POS_PPX) / 100, oy = (dy * POS_PPX) / 100;      /* screen px from centre */

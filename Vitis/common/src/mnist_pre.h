@@ -32,6 +32,9 @@ void mnist_preprocess_rgb8(uintptr_t cam_frmbuf, uint32_t stride, int invert, ui
 //   winner highlighted) — call each classification. Flushes the drawn region for the DMA.
 void mnist_draw_static(uintptr_t fb, uint32_t stride);
 void mnist_draw_live(uintptr_t fb, uint32_t stride, const int8_t *img28, const int32_t *logits);
+// Model input side for the preview + position gauges: 28 (default; mbdpu01/02, preview x4, dx/dy
+// in 28-px units) or 112 (mbdpu03: 112x112 input drawn 1:1, dx/dy in 112-px units). Call once.
+void mnist_set_input_dim(int dim);
 
 // Rotating-disc HUD state. Rate/latency fields carry a value x10 (one decimal) or -1 for "--"
 // (no data yet); trig_on/strobe_armed render OFF/ON and OFF/ARM; expo is exposure lines;

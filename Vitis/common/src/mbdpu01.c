@@ -81,3 +81,52 @@ int mbdpu02_infer(uint32_t base, uint64_t wblob, uint64_t pblob,
     }
     return (int)o[10];   // argmax prediction
 }
+
+/* ---- mbdpu03 ---------------------------------------------------------------------------- */
+static uint32_t pblob_sig(uint64_t pblob)
+{
+    volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)pblob;
+    Xil_DCacheInvalidateRange((UINTPTR)pblob, MBDPU03_PBLOB_BYTES);
+    uint32_t h = 2166136261u;                       /* FNV-1a over the 110 param words */
+    for (uint32_t i = 0; i < MBDPU03_PBLOB_BYTES / 4u; i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+
+int mbdpu03_infer(uint32_t base, uint64_t wblob, uint64_t pblob, uint64_t img, uint64_t out,
+                  uint64_t cam, uint32_t stride, uint32_t x0, uint32_t y0, uint32_t blk_shift,
+                  int32_t logits[10], int32_t pos_x100[2])
+{
+    static int      loaded = 0;
+    static uint32_t sig = 0;
+    uint32_t ctrl = 0;
+    uint32_t s = pblob_sig(pblob);                  /* new params (reload_weights) -> reload */
+    if (!loaded || s != sig) {
+        Xil_DCacheFlushRange((UINTPTR)wblob, MBDPU03_WBLOB_BYTES);
+        Xil_DCacheFlushRange((UINTPTR)pblob, MBDPU03_PBLOB_BYTES);
+        ctrl |= MBDPU03_CTRL_RELOAD;
+        loaded = 1; sig = s;
+    }
+    Xil_Out32(base + MBDPU03_CAM_LO,    (uint32_t)(cam & 0xFFFFFFFFu));
+    Xil_Out32(base + MBDPU03_CAM_HI,    (uint32_t)(cam >> 32));
+    Xil_Out32(base + MBDPU03_STRIDE,    stride);
+    Xil_Out32(base + MBDPU03_X0,        x0);
+    Xil_Out32(base + MBDPU03_Y0,        y0);
+    Xil_Out32(base + MBDPU03_BLK_SHIFT, blk_shift);
+    Xil_Out32(base + MBDPU03_CTRL,      ctrl);
+    mbdpu01_start(base, wblob, pblob, img, out);
+    while (!mbdpu01_done(base)) { }
+
+    Xil_DCacheInvalidateRange((UINTPTR)out, MBDPU03_OUT_BYTES);
+    Xil_DCacheInvalidateRange((UINTPTR)img, MBDPU03_IMG_BYTES);   /* core wrote the 112x112 input */
+    volatile int32_t *o = (volatile int32_t *)(uintptr_t)out;
+    if (logits) for (int i = 0; i < 10; i++) logits[i] = o[i];
+    if (pos_x100) {
+        volatile int32_t *p = (volatile int32_t *)(uintptr_t)pblob;   /* invalidated by pblob_sig */
+        int64_t k = p[MBDPU03_PBLOB_POSK];
+        int     sh = (int)p[MBDPU03_PBLOB_POSH];
+        if (sh < 0 || sh > 62) sh = 0;
+        pos_x100[0] = (int32_t)(((int64_t)o[11] * k) >> sh);
+        pos_x100[1] = (int32_t)(((int64_t)o[12] * k) >> sh);
+    }
+    return (int)o[10];
+}

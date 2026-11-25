@@ -14,10 +14,12 @@
     "heap_size": "0x10000",
     "boardnames": {
         "scu200_ai_demo01": "SCU200",
-        "scu200_ai_demo02": "SCU200"
+        "scu200_ai_demo02": "SCU200",
+        "scu200_ai_demo03": "SCU200"
     },
     "bd_names": {
         "scu200_ai_demo01": "scu200_ai_demo01",
-        "scu200_ai_demo02": "scu200_ai_demo02"
+        "scu200_ai_demo02": "scu200_ai_demo02",
+        "scu200_ai_demo03": "scu200_ai_demo03"
     }
 }

@@ -2,9 +2,10 @@
 # default scu200_ai_demo01) into the files that get programmed / reloaded.
 #   xsct scripts/program.tcl                     -> scu200_ai_demo01 (mbdpu01 weights)
 #   xsct scripts/program.tcl scu200_ai_demo02    -> scu200_ai_demo02 (mbdpu02 weights + dx/dy head)
+#   xsct scripts/program.tcl scu200_ai_demo03    -> scu200_ai_demo03 (mbdpu03 112x112 weights)
 # Sets: target, pdi, elf, bg, wblob, pblob (all absolute paths under $root).
 set target [expr {$argc > 0 ? [lindex $argv 0] : "scu200_ai_demo01"}]
-set core_of [dict create scu200_ai_demo01 mbdpu01 scu200_ai_demo02 mbdpu02]
+set core_of [dict create scu200_ai_demo01 mbdpu01 scu200_ai_demo02 mbdpu02 scu200_ai_demo03 mbdpu03]
 if {![dict exists $core_of $target]} {
     puts "ERROR: unknown target '$target' (expected one of: [dict keys $core_of])"
     exit 1

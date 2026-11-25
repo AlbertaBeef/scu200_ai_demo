@@ -43,6 +43,8 @@ dict set target_dict scu200 { xilinx.com scu200 { 0 2 } scu200 0 }
 dict set target_dict scu200_ai_demo01 { xilinx.com scu200 { 0 } scu200_ai_demo01 0 }
 # scu200_ai_demo02: demo01 with mbdpu02 (MNIST CNN + dx/dy position head) in place of mbdpu01.
 dict set target_dict scu200_ai_demo02 { xilinx.com scu200 { 0 } scu200_ai_demo02 0 }
+# scu200_ai_demo03: mbdpu03 (112x112 mono CNN + position head, URAM, camera crop fused in; no mbpre).
+dict set target_dict scu200_ai_demo03 { xilinx.com scu200 { 0 } scu200_ai_demo03 0 }
 # UPDATER END
 
 # Function to display the options and get user input

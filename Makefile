@@ -24,6 +24,7 @@ COMBINE_BIT_ELF = false
 scu200_target := microblaze baremetal_only
 scu200_ai_demo01_target := microblaze baremetal_only
 scu200_ai_demo02_target := microblaze baremetal_only
+scu200_ai_demo03_target := microblaze baremetal_only
 # UPDATER END
 
 TARGET_LIST := $(sort $(patsubst %_target,%,$(filter %_target,$(.VARIABLES))))

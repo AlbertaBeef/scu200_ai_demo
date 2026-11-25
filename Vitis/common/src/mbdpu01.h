@@ -62,4 +62,36 @@ int  mbdpu01_infer(uint32_t base, uint64_t wblob, uint64_t pblob,
 int  mbdpu02_infer(uint32_t base, uint64_t wblob, uint64_t pblob,
                    uint64_t img, uint64_t out, int32_t logits[10], int32_t pos_x100[2]);
 
+// --- mbdpu03 = 112x112 mono CNN + dx/dy head, camera crop fused in (Vivado/ip/mbdpu03/) -----
+// The four pointer registers (wblob/pblob/img/out) keep the MBDPU01_* offsets; the extra
+// registers below are CONFIRMED against the HLS-generated xmbdpu03_hw.h.
+#define MBDPU03_CAM_LO     0x40u  // camera frame (RGB8 mono) DDR address
+#define MBDPU03_CAM_HI     0x44u
+#define MBDPU03_STRIDE     0x4Cu  // frame stride (bytes)
+#define MBDPU03_X0         0x54u  // crop top-left
+#define MBDPU03_Y0         0x5Cu
+#define MBDPU03_BLK_SHIFT  0x64u  // zoom: crop = 112 << blk_shift (0..2), box-averaged to 112x112
+#define MBDPU03_CTRL       0x6Cu  // bits below
+#define MBDPU03_CTRL_RELOAD  0x1u // (re)load weights + params into the core's on-chip stores
+#define MBDPU03_CTRL_SRC_IMG 0x2u // input from img (self-test) instead of the camera
+#define MBDPU03_CTRL_INVERT  0x4u // camera path: 127 - q
+#define MBDPU03_DIM          112u
+#define MBDPU03_WBLOB_BYTES  33864u      // int8 weights (4 conv + fc 12x1568)
+#define MBDPU03_PBLOB_BYTES  (110u*4u)   // int32 params
+#define MBDPU03_IMG_BYTES    (112u*112u) // 112x112 int8 model input (written back by the core)
+#define MBDPU03_OUT_N        13u
+#define MBDPU03_OUT_BYTES    (MBDPU03_OUT_N*4u)
+#define MBDPU03_PBLOB_POSK   108u        // pblob index: px*100 multiplier (112-px units)
+#define MBDPU03_PBLOB_POSH   109u        // pblob index: shift
+
+// Blocking inference on mbdpu03 straight from a camera frame: the core crops (x0,y0, zoom
+// blk_shift), converts to 0..127 (no invert: the model is trained inverted), writes the 112x112
+// input back to img, and runs the CNN. Weights are cached on chip; they are (re)loaded on the
+// first call and whenever the param blob changes (e.g. after reload_weights.tcl). Returns the
+// argmax; logits / pos_x100 (1/100 px, 112-px units) may be NULL. img is cache-invalidated
+// on return so the CPU can draw it.
+int  mbdpu03_infer(uint32_t base, uint64_t wblob, uint64_t pblob, uint64_t img, uint64_t out,
+                   uint64_t cam, uint32_t stride, uint32_t x0, uint32_t y0, uint32_t blk_shift,
+                   int32_t logits[10], int32_t pos_x100[2]);
+
 #endif // MBDPU01_H

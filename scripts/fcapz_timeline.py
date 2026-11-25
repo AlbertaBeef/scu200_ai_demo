@@ -17,6 +17,7 @@ import sys
 LANES = [
     # (title, kind, fields)
     ("FSIN strobe",         "bit",  "fsin"),
+    ("SOF early (wake frame)", "bit", "frame_early"),
     ("frmbuf_wr writes",    "slot", ("wr_busy", "wr_slot")),
     ("frmbuf_wr IRQ",       "bit",  "wr_irq"),
     ("ISR (FrmbufWrCallback)", "bit", "isr"),
@@ -106,12 +107,33 @@ def summary(rows):
         r = next(x for x in rows if x["t_us"] >= a)
         print(f"  COL_DPU  t={a/1000:9.3f} ms  dur={(b-a):8.1f} us  slot={r['wr_slot']}  "
               f"fw_slot={r['fw_slot']} isr_next={r['isr_next_slot']} held={r['isr_held_slot']}")
+    # ISR bookkeeping check: the slot the ISR reports as "done" should be the slot of the
+    # last frame write that started before the ISR (its busy hold outlasts the IRQ).
+    isr_t = [(r["t_us"], r["isr_done_slot"]) for i, r in enumerate(rows)
+             if r["isr"] and (i == 0 or not rows[i - 1]["isr"])]
+    ok = n = 0
+    for t, _ in isr_t:
+        prev = [w for w in wr if w[0] <= t]
+        if not prev:
+            continue
+        # isr_done_slot is written at ISR exit: use the value at the next ISR entry
+        after = next((r for r in rows if r["t_us"] > t and not r["isr"]), None)
+        if after is None:
+            continue
+        n += 1
+        ok += after["isr_done_slot"] == prev[-1][2]
+    print(f"ISR done-slot == slot actually written: {ok}/{n}")
+    if "frame_early" in rows[0]:
+        ne = len([1 for i, r in enumerate(rows) if r["frame_early"] and (i == 0 or not rows[i - 1]["frame_early"])])
+        print(f"early (wake) SOFs: {ne}")
     return dict(wr=wr, dpu=dpu, inf=inf, col_dpu=cd, col_disp=cdisp, fsin=fs)
 
 
 def lanes_data(rows):
     lanes = []
     for title, kind, f in LANES:
+        if (f if isinstance(f, str) else f[0]) not in rows[0]:
+            continue                      # probe not in this capture (older bitstream)
         if kind == "bit":
             segs = [(a, b, 1) for a, b, _ in intervals(rows, f)]
         elif kind == "slot":

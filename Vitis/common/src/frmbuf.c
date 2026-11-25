@@ -117,6 +117,7 @@ int FrmbufWrInit(Frmbuf *Frmbuf, UINTPTR BaseAddr, UINTPTR BufrBaseAddr)
 
 	// Configure Frame Buffers
 	Frmbuf->FrmbufWrBufrAddr = BufrBaseAddr;
+	Frmbuf->FrmbufWrInFlightAddr = BufrBaseAddr;   /* latched by XVFrmbufWr_Start */
 	Frmbuf->FrmbufBufrBaseAddr = BufrBaseAddr;
 	Status = XVFrmbufWr_SetMemFormat(&(Frmbuf->FrmbufWr), FrmbufWrStride, Cfmt, &FrmbufWrStream);
 	if(Status != XST_SUCCESS) {
@@ -299,8 +300,18 @@ void *FrmbufWrCallback(void *data)
 	XV_FrmbufRd_l2 *frmbufrd = &(frmbuf->FrmbufRd);
 	u32 Status;
 
-    // The frame we just finished writing
-    UINTPTR completed = frmbuf->FrmbufWrBufrAddr;
+    /* Address pipeline (auto-restart). On DONE the core restarts at once and latches the
+     * buffer address that is programmed at that moment -- BEFORE this ISR runs. So:
+     *   - the frame that just completed used the address latched at the previous restart
+     *     (FrmbufWrInFlightAddr),
+     *   - the frame now starting uses the address programmed by the previous ISR
+     *     (FrmbufWrBufrAddr),
+     *   - what we program here takes effect one frame later.
+     * (fcapz showed the old "completed = last programmed" was the in-flight slot in 209/209
+     * ISRs: the worker got the wrong frame and the display hold protected the wrong slot.) */
+    UINTPTR completed = frmbuf->FrmbufWrInFlightAddr;
+    UINTPTR inflight  = frmbuf->FrmbufWrBufrAddr;
+    frmbuf->FrmbufWrInFlightAddr = inflight;
 #ifdef FCAPZ_MARK_PRESENT
     FMARK_B(s_fmark_b | FMB_ISR);
 #endif
@@ -311,16 +322,15 @@ void *FrmbufWrCallback(void *data)
     frmbuf->FrameSeq++;
     frmbuf->FrameReady = 1;
 
-    // Advance write pointer and wrap correctly
+    /* Next write slot: the one that is neither being written nor just completed. With the
+     * 3-slot ring this is a strict rotation, so a completed frame (handed to the worker and,
+     * in trigger mode, held on screen) is not rewritten until three frames later. */
     UINTPTR end = frmbuf->FrmbufBufrBaseAddr + (frmbuf->FrameSizeBytes * FRAME_MAX);
-    UINTPTR next_wr = frmbuf->FrmbufWrBufrAddr + frmbuf->FrameSizeBytes;
-    if (next_wr >= end) next_wr = frmbuf->FrmbufBufrBaseAddr;
-    // Skip the slot the app is holding on screen (trigger mode), so the write ring never
-    // overwrites the displayed frame. One skip suffices for the 3-slot ring (one held).
-    if (frmbuf->DisplayHeldAddr && next_wr == frmbuf->DisplayHeldAddr) {
+    UINTPTR next_wr = inflight;
+    do {
         next_wr += frmbuf->FrameSizeBytes;
         if (next_wr >= end) next_wr = frmbuf->FrmbufBufrBaseAddr;
-    }
+    } while (next_wr == inflight || next_wr == completed);
     frmbuf->FrmbufWrBufrAddr = next_wr;
 
 	// Set the buffer address to write the next frame

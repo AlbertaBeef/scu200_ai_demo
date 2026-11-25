@@ -55,3 +55,4 @@ connect_bd_net [get_bd_pins mipi_0/frmbufwr_irq]   [get_bd_pins fcapz_evtcap/wr_
 connect_bd_net [get_bd_pins mipi_0/frmbufrd_irq]   [get_bd_pins fcapz_evtcap/rd_irq]
 connect_bd_net [get_bd_pins fcapz_mark/gpio_io_o]  [get_bd_pins fcapz_evtcap/mark_a]
 connect_bd_net [get_bd_pins fcapz_mark/gpio2_io_o] [get_bd_pins fcapz_evtcap/mark_b]
+connect_bd_net [get_bd_pins mipi_0/fsin_frame_early] [get_bd_pins fcapz_evtcap/frame_early]

@@ -27,7 +27,9 @@
 //   [25]    col_disp   wr_busy & wr_slot == disp_slot              (display tearing)
 //   [27:26] mark_a[7:6]
 //   [29:28] mark_b[7:6]
-//   [31:30] 0
+//   [30]    frame_early fsin_frame_tag last_frame_early: 1 = last SOF came < DROP_WINDOW
+//                      after FSIN (wake frame, dropped when drop_en = 1)
+//   [31]    0
 //
 // Clocks: clk = 100 MHz (sample clock, mbdpu03, disc_strobe, GPIO); vclk = 300 MHz
 // (frame buffers). Both come from the same clk_wiz, so the 300->100 crossings are
@@ -115,6 +117,7 @@ module fcapz_evtcap #(
     input  wire        fsin,      // clk domain
     input  wire        wr_irq,    // vclk domain
     input  wire        rd_irq,    // vclk domain
+    input  wire        frame_early, // vclk domain (fsin_frame_tag last_frame_early)
     input  wire [7:0]  mark_a,    // clk domain
     input  wire [7:0]  mark_b     // clk domain
 );
@@ -177,12 +180,12 @@ module fcapz_evtcap #(
         end
     end
 
-    // ---- vclk -> clk: {wr_busy, wr_slot[2], rd_slot[2], wr_irq, rd_irq}
-    reg [6:0] v_q;   // source-registered (vclk)
+    // ---- vclk -> clk: {wr_busy, wr_slot[2], rd_slot[2], wr_irq, rd_irq, frame_early}
+    reg [7:0] v_q;   // source-registered (vclk)
     always @(posedge vclk)
-        v_q <= {rd_irq, wr_irq, rd_slot_v, wr_slot_v, wr_cnt[WR_HOLD_W]};
-    (* ASYNC_REG = "TRUE" *) reg [6:0] s1, s2;
-    reg [6:0] s3;
+        v_q <= {frame_early, rd_irq, wr_irq, rd_slot_v, wr_slot_v, wr_cnt[WR_HOLD_W]};
+    (* ASYNC_REG = "TRUE" *) reg [7:0] s1, s2;
+    reg [7:0] s3;
     always @(posedge clk) begin
         s1 <= v_q;
         s2 <= s1;
@@ -192,16 +195,17 @@ module fcapz_evtcap #(
     // group so busy never rises against a stale slot (that gave false collisions).
     reg [2:0] wr_grp = 3'b110;      // {slot=3, busy=0}
     reg [1:0] disp_slot = 2'd3;
-    reg [1:0] irq_s = 2'b00;
+    reg [2:0] irq_s = 3'b000;
     always @(posedge clk) begin
         if (s2[2:0] == s3[2:0]) wr_grp    <= s2[2:0];
         if (s2[4:3] == s3[4:3]) disp_slot <= s2[4:3];
-        irq_s <= s2[6:5];            // match the filter's one-sample delay
+        irq_s <= s2[7:5];            // match the filter's one-sample delay
     end
     wire       wr_busy  = wr_grp[0];
     wire [1:0] wr_slot  = wr_grp[2:1];
     wire       wr_irq_s = irq_s[0];
     wire       rd_irq_s = irq_s[1];
+    wire       early_s  = irq_s[2];
 
     // ------------------------------------------------------------------ event word
     reg  [7:0] ma_q, mb_q;
@@ -215,7 +219,7 @@ module fcapz_evtcap #(
     wire col_dpu  = dpu_busy & wr_busy & (wr_slot == dpu_slot);
     wire col_disp = wr_busy & (wr_slot == disp_slot);
 
-    wire [31:1] cur = {2'b00, mb_q[7:6], ma_q[7:6], col_disp, col_dpu,
+    wire [31:1] cur = {1'b0, early_s, mb_q[7:6], ma_q[7:6], col_disp, col_dpu,
                        mb_q[5:0], ma_q[5:0], disp_slot, rd_irq_s, dpu_slot, dpu_busy,
                        wr_irq_s, wr_slot, wr_busy, fsin_q};
     reg  [31:1] cur_q = 0;

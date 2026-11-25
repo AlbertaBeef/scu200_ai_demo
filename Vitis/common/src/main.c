@@ -78,6 +78,17 @@
 #include "disc_strobe.h" /* motor variant only: encoder decode + angle strobe (guarded by DISC_STROBE_PRESENT) */
 #include "ov9281.h"   /* for the FSIN trigger-mode toggle wired to the disc_strobe 'F' key */
 #include "fcapz_mark.h" /* fcapz timeline markers (no-ops unless the fcapz_mark GPIO exists) */
+/* fsin_frame_tag (PL, in front of v_frmbuf_wr): with drop_en set it discards the OV9281
+ * wake frame (SOF < 13 ms after FSIN), so frmbuf_wr only writes the good frame per strobe.
+ * GPIO ch1[0] = drop_en, ch2 = dropped-frame counter. */
+#ifdef XPAR_FSIN_TAG_GPIO_BASEADDR
+#define FSIN_TAG_PRESENT 1
+#define FSIN_TAG_SET_DROP(en) Xil_Out32(XPAR_FSIN_TAG_GPIO_BASEADDR + 0x0u, (en) ? 1u : 0u)
+#define FSIN_TAG_DROPPED()    Xil_In32(XPAR_FSIN_TAG_GPIO_BASEADDR + 0x8u)
+#else
+#define FSIN_TAG_SET_DROP(en) ((void)(en))
+#define FSIN_TAG_DROPPED()    0u
+#endif
 
 #if defined(DISC_STROBE_PRESENT)
 /* Bridge the disc_strobe 'F' console key to the OV9281 FSIN trigger mode. */
@@ -103,6 +114,7 @@ static void ov9281_fsin_trigger_cb(int enable)
      * TX-restart but the sink still re-syncs) -- it's a fabric-level coupling between the camera
      * pipe and the v_mix master feeding HDMI. A true fix needs a block-design change. Left as-is. */
     ov9281_set_trigger_mode(g_ov9281_iic, enable);
+    FSIN_TAG_SET_DROP(enable);   /* trigger mode: drop the wake frame in the PL */
     /* In trigger mode the worker drives the camera display so it can drop the dim wake frame;
      * in free-run the DONE ISR drives it (smooth). */
     g_trig_active = enable ? 1 : 0;
@@ -448,8 +460,9 @@ static int mnist_crop_key(int ch)
               xil_printf("expo=%lu lines\r\n", (unsigned long)g_exposure); return 1;
     case 'B': { /* TEST probe: frame-dones (ISR) vs strobe revs -> extra-frame ratio; bright range */
                 uint32_t seq = g_cam_frmbuf ? g_cam_frmbuf->FrameSeq : 0;
-                xil_printf("probe: frame-dones=%lu revs=%lu bright[min=%lu max=%lu]\r\n",
+                xil_printf("probe: frame-dones=%lu revs=%lu dropped=%lu bright[min=%lu max=%lu]\r\n",
                            (unsigned long)seq, (unsigned long)disc_strobe_revs(),
+                           (unsigned long)FSIN_TAG_DROPPED(),
                            (unsigned long)g_frm_min, (unsigned long)g_frm_max);
                 g_frm_min = 255; g_frm_max = 0; } return 1;
     default:  return 0;
@@ -1934,7 +1947,8 @@ int main() {
 				if (mean > g_frm_max) g_frm_max = mean;
 			}
 			/* Good-frame gate: in FSIN-trigger mode the OV9281 emits a dim wake-settling frame
-			 * per pulse. Drop frames dimmer than half the last good one — skip display + ROI +
+			 * per pulse. (Where fsin_frame_tag exists the PL already drops it; this stays as a
+			 * fallback.) Drop frames dimmer than half the last good one — skip display + ROI +
 			 * inference so neither the camera layer nor the ROI flashes; the display holds the
 			 * last good frame. In free-run (g_trig_active=0) nothing is gated. */
 			int frame_dim = (g_trig_active && g_last_good_bright != 0u &&

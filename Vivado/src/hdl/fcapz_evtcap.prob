@@ -118,6 +118,11 @@
       "name": "isr_held_slot",
       "width": 2,
       "lsb": 28
+    },
+    {
+      "name": "frame_early",
+      "width": 1,
+      "lsb": 30
     }
   ]
 }

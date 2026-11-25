@@ -15,7 +15,10 @@ typedef struct {
 	XV_FrmbufWr_l2 FrmbufWr;
 	XV_FrmbufRd_l2 FrmbufRd;
 	UINTPTR FrmbufBufrBaseAddr;
-	UINTPTR FrmbufWrBufrAddr;
+	UINTPTR FrmbufWrBufrAddr;     /* last address PROGRAMMED into frmbuf_wr (used from the
+	                               * frame after next: see FrmbufWrCallback) */
+	UINTPTR FrmbufWrInFlightAddr; /* address frmbuf_wr latched at its last (auto)start, i.e.
+	                               * the slot it is writing now */
 	UINTPTR FrmbufRdBufrAddr;
     u32     FrameStrideBytes;
     u32     FrameLines;
@@ -31,9 +34,9 @@ typedef struct {
      * it (FrmbufTakeFrame + XVFrmbufRd_SetBufferAddr), so it can skip bad frames (e.g. the
      * OV9281 wake-settling frame in FSIN-trigger mode) instead of flashing them on screen. */
     volatile u8      AppDrivesRd;
-    /* Slot the app is currently displaying (trigger mode). The DONE ISR skips this slot when
-     * advancing the write ring, so the write core never overwrites the on-screen frame while
-     * the app holds it. 0 = no hold (free-run). */
+    /* Slot the app is currently displaying (trigger mode). Informational (fcapz markers):
+     * the ring rotation itself keeps the shown frame safe for ~2 frame periods, because a
+     * slot is only rewritten three frames after it completed. 0 = no hold (free-run). */
     volatile UINTPTR DisplayHeldAddr;
 } Frmbuf;
 

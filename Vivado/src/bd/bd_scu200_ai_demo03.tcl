@@ -918,6 +918,12 @@ connect_bd_net [get_bd_pins disc_strobe/xvs] [get_bd_ports MOTOR_XVS]
 
 lappend periph_ports [list "disc_strobe/s_axi_ctrl" "clk_wiz/clk_100M" "rst_clk_wiz_100M/peripheral_aresetn"]
 
+# scu200_ai_demo03_fcapz: add the fcapz event-timeline capture (marker GPIO + ELA).
+# The plain demo03 target never sets fcapz_en, so its design is unchanged.
+if {[info exists fcapz_en] && $fcapz_en} {
+  source [file join [file dirname [info script]] fcapz_evtcap_bd.tcl]
+}
+
 #########################################################
 # AXI Interfaces and interrupts
 #########################################################

@@ -16,6 +16,7 @@ scu200_target := xilinx.com scu200
 scu200_ai_demo01_target := xilinx.com scu200
 scu200_ai_demo02_target := xilinx.com scu200
 scu200_ai_demo03_target := xilinx.com scu200
+scu200_ai_demo03_fcapz_target := xilinx.com scu200
 # UPDATER END
 
 TARGET_LIST := $(sort $(patsubst %_target,%,$(filter %_target,$(.VARIABLES))))

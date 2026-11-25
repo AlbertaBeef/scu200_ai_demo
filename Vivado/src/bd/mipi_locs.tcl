@@ -157,3 +157,4 @@ dict set mipi_loc_dict scu200_ai_demo01 0 [dict get $mipi_loc_dict scu200 0]
 dict set mipi_loc_dict scu200_ai_demo02 0 [dict get $mipi_loc_dict scu200 0]
 # scu200_ai_demo03: mbdpu03 (112x112 mono CNN, URAM) — same camera/pinout.
 dict set mipi_loc_dict scu200_ai_demo03 0 [dict get $mipi_loc_dict scu200 0]
+dict set mipi_loc_dict scu200_ai_demo03_fcapz 0 [dict get $mipi_loc_dict scu200 0]

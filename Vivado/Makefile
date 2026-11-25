@@ -23,6 +23,8 @@ scu200_ai_demo01_target := xilinx.com scu200 no_accel
 scu200_ai_demo02_target := xilinx.com scu200 no_accel
 # 112x112 mono mbdpu03 (URAM, camera crop fused in; no mbpre).
 scu200_ai_demo03_target := xilinx.com scu200 no_accel
+# demo03 + fpgacapZero event-timeline capture (fcapz_evtcap + fcapz_mark GPIO).
+scu200_ai_demo03_fcapz_target := xilinx.com scu200 no_accel
 # UPDATER END
 
 TARGET_LIST := $(sort $(patsubst %_target,%,$(filter %_target,$(.VARIABLES))))

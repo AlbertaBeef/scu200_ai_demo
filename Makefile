@@ -25,6 +25,8 @@ scu200_target := microblaze baremetal_only
 scu200_ai_demo01_target := microblaze baremetal_only
 scu200_ai_demo02_target := microblaze baremetal_only
 scu200_ai_demo03_target := microblaze baremetal_only
+# demo03 + fpgacapZero event-timeline capture (ELA on BSCAN USER3, marker GPIO).
+scu200_ai_demo03_fcapz_target := microblaze baremetal_only
 # UPDATER END
 
 TARGET_LIST := $(sort $(patsubst %_target,%,$(filter %_target,$(.VARIABLES))))

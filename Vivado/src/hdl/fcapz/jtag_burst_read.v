@@ -1,0 +1,204 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+`timescale 1ns/1ps
+
+// Burst data readout interface (vendor-agnostic).
+//
+// TAP signals are provided by an external vendor-specific wrapper.
+// Provides a wide DR (256-bit default) that packs multiple samples
+// per scan, reducing the number of JTAG scans by 8-32x.
+//
+// Protocol:
+//   1. Host writes BURST_PTR via the control interface.
+//   2. Host selects this TAP and performs DR scans.
+//   3. Each CAPTURE loads SAMPLES_PER_SCAN samples from the buffer.
+//   4. Each SHIFT outputs BURST_W bits of packed sample data (LSB first).
+//   5. Read pointer auto-increments after each scan.
+//
+// Timing: the staging buffer is pre-loaded during the SHIFT phase of
+// the current scan, so data is ready before the next CAPTURE.
+//
+// tdo_next is the value tdo takes at the next tck edge (see jtag_reg_iface).
+
+module jtag_burst_read #(
+    parameter SAMPLE_W = 8,
+    parameter TIMESTAMP_W = 0,
+    parameter DEPTH    = 1024,
+    parameter BURST_W  = 256,
+    // Ring depth for read pointer (DEPTH when one segment; DEPTH/NUM_SEGMENTS when split)
+    parameter SEG_DEPTH = DEPTH
+) (
+    input  wire        arst,
+
+    // TAP signals (from vendor-specific wrapper)
+    input  wire        tck,
+    input  wire        tdi,
+    output wire        tdo,
+    output wire        tdo_next,
+    input  wire        capture,
+    input  wire        shift_en,
+    input  wire        update,
+    input  wire        sel,
+
+    // Dual-port memory read (tck domain)
+    output wire [$clog2(DEPTH)-1:0] mem_addr,
+    output wire                      mem_active,
+    input  wire [SAMPLE_W-1:0]      sample_data,
+    input  wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] timestamp_data,
+
+    // Control (tck domain, from ila_core via reg bus)
+    input  wire                      burst_start,
+    input  wire                      burst_timestamp,
+    input  wire [$clog2(DEPTH)-1:0]  burst_ptr_in
+);
+
+    localparam PTR_W = $clog2(DEPTH);
+    localparam SEG_PTR_W = $clog2(SEG_DEPTH);
+    localparam SAMPLES_PER_SCAN = BURST_W / SAMPLE_W;
+    localparam TS_W_SAFE = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
+    // Without an aux lane (TIMESTAMP_W = 0) a timestamp-lane request reads
+    // samples: the lane path, its 256-bit shift mux and the wider load
+    // counter are left out.
+    localparam HAS_TS = (TIMESTAMP_W > 0);
+    localparam TS_PER_SCAN = HAS_TS ? (BURST_W / TS_W_SAFE) : SAMPLES_PER_SCAN;
+    localparam MAX_PER_SCAN = (SAMPLES_PER_SCAN > TS_PER_SCAN) ? SAMPLES_PER_SCAN : TS_PER_SCAN;
+    localparam LOAD_CTR_W = $clog2(MAX_PER_SCAN + 1);
+    localparam [LOAD_CTR_W-1:0] SAMPLES_PER_SCAN_C = SAMPLES_PER_SCAN;
+    localparam [LOAD_CTR_W-1:0] TS_PER_SCAN_C = TS_PER_SCAN;
+
+    // Static assert: SEG_DEPTH must be a power-of-two
+    generate
+        if (SEG_DEPTH != 0 && (SEG_DEPTH & (SEG_DEPTH - 1)) != 0) begin : g_bad_seg_depth
+            SEG_DEPTH_must_be_power_of_two invalid();
+        end
+    endgenerate
+
+    reg [BURST_W-1:0] sr;
+    reg [BURST_W-1:0] staging;
+    reg [SEG_PTR_W-1:0] rd_off;
+    reg [SEG_PTR_W-1:0] next_off;
+    reg [PTR_W-1:0]   burst_seg_base;
+    reg [LOAD_CTR_W-1:0] load_cnt;
+    reg burst_timestamp_r;
+    reg burst_start_seen;
+    reg loading;
+    wire [LOAD_CTR_W-1:0] words_per_scan =
+        burst_timestamp_r ? TS_PER_SCAN_C : SAMPLES_PER_SCAN_C;
+    wire [LOAD_CTR_W-1:0] start_words_per_scan =
+        (HAS_TS && burst_timestamp) ? TS_PER_SCAN_C : SAMPLES_PER_SCAN_C;
+
+    // Segment base address derived from burst_ptr_in (generate avoids zero-width slice)
+    wire [PTR_W-1:0] seg_base_of_ptr;
+    wire [SEG_PTR_W-1:0] burst_ptr_off;
+    generate
+        if (SEG_DEPTH >= DEPTH) begin : g_seg_base_flat
+            assign seg_base_of_ptr = {PTR_W{1'b0}};
+            assign burst_ptr_off = burst_ptr_in;
+        end else begin : g_seg_base_split
+            assign seg_base_of_ptr = {burst_ptr_in[PTR_W-1:SEG_PTR_W], {SEG_PTR_W{1'b0}}};
+            assign burst_ptr_off = burst_ptr_in[SEG_PTR_W-1:0];
+        end
+    endgenerate
+
+    assign tdo      = sr[0];
+    // The priming capture of a burst leaves sr as it is.
+    assign tdo_next = arst                ? 1'b0 :
+                      sel && capture      ? ((burst_start ^ burst_start_seen) ? sr[0]
+                                                                              : staging[0]) :
+                      sel && shift_en     ? sr[1] :
+                                            sr[0];
+
+`ifndef SYNTHESIS
+    // tdo_next has to be the tdo of the next tck edge.
+    reg tdo_next_q, tdo_next_seen;
+    initial begin
+        tdo_next_q = 1'b0;
+        tdo_next_seen = 1'b0;
+    end
+    always @(posedge tck or posedge arst) begin
+        if (arst) begin
+            tdo_next_seen <= 1'b0;
+        end else begin
+            tdo_next_q <= tdo_next;
+            tdo_next_seen <= 1'b1;
+        end
+    end
+    always @(negedge tck) begin
+        if (!arst && tdo_next_seen && tdo !== tdo_next_q)
+            $fatal(1, "jtag_burst_read: tdo_next was %b, tdo became %b", tdo_next_q, tdo);
+    end
+`endif
+    assign mem_active = loading | (sel && capture);
+    generate
+        if (SEG_DEPTH >= DEPTH) begin : g_mem_addr_flat
+            assign mem_addr = rd_off;
+        end else begin : g_mem_addr_split
+            assign mem_addr = {burst_seg_base[PTR_W-1:SEG_PTR_W], rd_off};
+        end
+    endgenerate
+
+    always @(posedge tck or posedge arst) begin
+        if (arst) begin
+            sr       <= {BURST_W{1'b0}};
+            staging  <= {BURST_W{1'b0}};
+            rd_off   <= {SEG_PTR_W{1'b0}};
+            next_off <= {SEG_PTR_W{1'b0}};
+            burst_seg_base <= {PTR_W{1'b0}};
+            load_cnt <= {LOAD_CTR_W{1'b0}};
+            burst_timestamp_r <= 1'b0;
+            burst_start_seen <= 1'b0;
+            loading  <= 1'b0;
+        end else begin
+
+            // Burst start crosses from the USER1 register chain into the
+            // USER2 burst chain as a toggle. USER2's BSCAN clock is gated
+            // separately, so a one-cycle USER1 pulse is not reliable here.
+            if (sel && capture && (burst_start ^ burst_start_seen)) begin
+                burst_start_seen <= burst_start;
+                burst_seg_base <= seg_base_of_ptr;
+                rd_off <= burst_ptr_off + start_words_per_scan - 1'b1;
+                next_off <= burst_ptr_off + start_words_per_scan;
+                load_cnt <= {LOAD_CTR_W{1'b0}};
+                burst_timestamp_r <= HAS_TS && burst_timestamp;
+                loading  <= 1'b1;
+            end else begin
+                if (sel) begin
+                    if (capture) begin
+                        // Load shift register from staging buffer
+                        sr <= staging;
+                        // Start filling staging for next scan
+                        rd_off <= next_off + words_per_scan - 1'b1;
+                        next_off <= next_off + words_per_scan;
+                        load_cnt <= {LOAD_CTR_W{1'b0}};
+                        loading  <= 1'b1;
+                    end else if (shift_en) begin
+                        sr <= {tdi, sr[BURST_W-1:1]};
+                    end
+                end
+
+                // Staging buffer fill: read one word per cycle from memory.
+                // Memory data is available 1 cycle after rd_off is set.  The
+                // reader walks backward and shifts each word into the low end
+                // so the final staging layout is still sample0 at bits [0+:W].
+                if (loading && !(sel && capture)) begin
+                    if (load_cnt > 0) begin
+                        if (burst_timestamp_r)
+                            staging <= (staging << TS_W_SAFE)
+                                | {{(BURST_W-TS_W_SAFE){1'b0}}, timestamp_data};
+                        else
+                            staging <= (staging << SAMPLE_W)
+                                | {{(BURST_W-SAMPLE_W){1'b0}}, sample_data};
+                    end
+                    if (load_cnt == words_per_scan) begin
+                        loading <= 1'b0;
+                    end else begin
+                        rd_off <= rd_off - 1'b1;
+                        load_cnt <= load_cnt + 1'b1;
+                    end
+                end
+            end
+        end
+    end
+
+endmodule

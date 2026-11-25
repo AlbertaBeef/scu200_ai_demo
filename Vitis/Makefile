@@ -23,6 +23,7 @@ scu200_target := microblaze
 scu200_ai_demo01_target := microblaze
 scu200_ai_demo02_target := microblaze
 scu200_ai_demo03_target := microblaze
+scu200_ai_demo03_fcapz_target := microblaze
 # UPDATER END
 
 TARGET_LIST := $(sort $(patsubst %_target,%,$(filter %_target,$(.VARIABLES))))

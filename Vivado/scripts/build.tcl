@@ -45,6 +45,8 @@ dict set target_dict scu200_ai_demo01 { xilinx.com scu200 { 0 } scu200_ai_demo01
 dict set target_dict scu200_ai_demo02 { xilinx.com scu200 { 0 } scu200_ai_demo02 0 }
 # scu200_ai_demo03: mbdpu03 (112x112 mono CNN + position head, URAM, camera crop fused in; no mbpre).
 dict set target_dict scu200_ai_demo03 { xilinx.com scu200 { 0 } scu200_ai_demo03 0 }
+# scu200_ai_demo03_fcapz: demo03 + fpgacapZero event-timeline capture (bd sources demo03 with fcapz_en).
+dict set target_dict scu200_ai_demo03_fcapz { xilinx.com scu200 { 0 } scu200_ai_demo03_fcapz 0 }
 # UPDATER END
 
 # Function to display the options and get user input
@@ -286,6 +288,9 @@ if {[catch {source $bd_script_path} errmsg]} {
 # Generate the wrapper
 make_wrapper -files [get_files *${block_name}.bd] -top
 add_files -norecurse ${design_name}/${design_name}.gen/sources_1/bd/${block_name}/hdl/${block_name}_wrapper.v
+# Re-assert the top: a block design with RTL module references (e.g. fcapz_evtcap) adds
+# sources before the wrapper exists, and automatic hierarchy mode may have picked one of them.
+set_property top ${block_name}_wrapper [get_filesets sources_1]
 
 # Update the compile order
 update_compile_order -fileset sources_1

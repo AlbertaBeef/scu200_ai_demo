@@ -77,6 +77,7 @@
 #include "motor.h"   /* motor variant only: DRV8874 speed/dir + encoder (guarded by MOTOR_PRESENT) */
 #include "disc_strobe.h" /* motor variant only: encoder decode + angle strobe (guarded by DISC_STROBE_PRESENT) */
 #include "ov9281.h"   /* for the FSIN trigger-mode toggle wired to the disc_strobe 'F' key */
+#include "fcapz_mark.h" /* fcapz timeline markers (no-ops unless the fcapz_mark GPIO exists) */
 
 #if defined(DISC_STROBE_PRESENT)
 /* Bridge the disc_strobe 'F' console key to the OV9281 FSIN trigger mode. */
@@ -1908,6 +1909,17 @@ int main() {
 		if (HdmiStreamUp && NumActiveCams > 0 &&
 		    FrmbufTakeFrame(&ActiveCams[0].VideoPipePtr->Frmbuf, &cambuf)) {
 			int32_t logits[10];
+			/* fcapz timeline markers (no-ops unless the fcapz_mark GPIO exists) */
+			u32 fma = FMA_TAKE | FMA_SLOT(fmark_slot(ActiveCams[0].VideoPipePtr->Frmbuf.FrmbufBufrBaseAddr,
+			                                         ActiveCams[0].VideoPipePtr->Frmbuf.FrameSizeBytes, cambuf));
+			FMARK_A(fma);
+#ifdef FCAPZ_MARK_PRESENT
+			{ static int once = 0;   /* must match fcapz_evtcap SLOT_BASE / SLOT_SIZE */
+			  if (!once) { once = 1;
+			    xil_printf("fcapz: frame slots base 0x%08lx size 0x%lx\r\n",
+			               (unsigned long)ActiveCams[0].VideoPipePtr->Frmbuf.FrmbufBufrBaseAddr,
+			               (unsigned long)ActiveCams[0].VideoPipePtr->Frmbuf.FrameSizeBytes); } }
+#endif
 			/* Mean brightness of the frame's centre row (green byte = luma), for the good-frame
 			 * gate below. The frame is DMA-written, so invalidate the row before the CPU reads. */
 			u32 mean;
@@ -1927,12 +1939,14 @@ int main() {
 			 * last good frame. In free-run (g_trig_active=0) nothing is gated. */
 			int frame_dim = (g_trig_active && g_last_good_bright != 0u &&
 			                 mean < (g_last_good_bright >> 1)) ? 1 : 0;
+			if (frame_dim) FMARK_A(fma | FMA_DIM);
 			if (!frame_dim) {
 			g_last_good_bright = mean;
 			if (g_trig_active && g_cam_frmbuf) {   /* worker drives display: show this good frame */
 				g_cam_frmbuf->DisplayHeldAddr = cambuf;   /* tell the ISR to not overwrite this slot */
 				g_cam_frmbuf->FrmbufRdBufrAddr = cambuf;
 				XVFrmbufRd_SetBufferAddr(&g_cam_frmbuf->FrmbufRd, cambuf);
+				fma |= FMA_HELD; FMARK_A(fma);
 			}
 #ifdef STATS_ENABLE
 			uint32_t _lt0 = Xil_In32(RT_BASE + RT_TCR);   /* stage-latency stamp: start */
@@ -1967,10 +1981,12 @@ int main() {
 			uint32_t _lt1 = Xil_In32(RT_BASE + RT_TCR);   /* end mbpre preprocess */
 #endif
 #if defined(MBDPU03_CORE)
+			FMARK_A(fma | FMA_INFER);
 			int pred = mbdpu03_infer(MBDPU01_BASE, MBDPU01_WBLOB, MBDPU01_PBLOB,
 			                         MBDPU01_IMG, MBDPU01_OUT, (uint64_t)cambuf,
 			                         ActiveCams[0].VideoPipePtr->Frmbuf.FrameStrideBytes,
 			                         g_crop_x0, g_crop_y0, g_crop_shift, logits, g_pos_x100);
+			FMARK_A(fma);
 #elif defined(MBDPU_HAS_POS)
 			int pred = mbdpu02_infer(MBDPU01_BASE, MBDPU01_WBLOB, MBDPU01_PBLOB,
 			                         MBDPU01_IMG, MBDPU01_OUT, logits, g_pos_x100);
@@ -2020,6 +2036,7 @@ int main() {
 			 * the BACK buffer, then pageflip bg_frmbuf_rd to it so the scanout only ever
 			 * sees a complete panel (no mid-draw tearing). Flip lands at the next frame
 			 * boundary (auto-restart), then we swap front/back for the next capture. */
+			FMARK_A(fma | FMA_OVERLAY);
 			mnist_draw_live(g_bg_back, (u32)(VMODE_WIDTH*3u),
 			                (const int8_t *)(uintptr_t)MBDPU01_IMG, logits);
 #ifdef MBDPU_HAS_POS
@@ -2027,6 +2044,7 @@ int main() {
 #endif
 			XVFrmbufRd_SetBufferAddr(&BgFrmbufRd, g_bg_back);
 			{ uintptr_t t = g_bg_front; g_bg_front = g_bg_back; g_bg_back = t; }
+			FMARK_A(fma);
 #endif
 #ifdef STATS_ENABLE
 			/* Stage latencies -> ms x10 (10000 ticks @100 MHz = 0.1 ms). The stats panel
@@ -2051,14 +2069,19 @@ int main() {
 #ifdef STATS_ENABLE
 			if (g_hud_on)
 #endif
+			{
+			FMARK_A(fma | FMA_ROIBOX);
 			mnist_draw_roi_box(cambuf, ActiveCams[0].VideoPipePtr->Frmbuf.FrameStrideBytes,
 			                   (int)g_crop_x0, (int)g_crop_y0, (int)(CROP_DIM << g_crop_shift),
 			                   0x22E6E6u /*teal, matches the HUD/overlay*/, 4);
+			FMARK_A(fma);
+			}
 #endif
 #ifdef MNIST_VERBOSE
 			xil_printf("MNIST: %d (logit=%d)\r\n", pred, (int)logits[pred]);
 #endif
 			}   /* end good-frame gate */
+			FMARK_A(FMA_SLOT(3));   /* capture done: take=0, slot=none */
 		}
 #endif
 

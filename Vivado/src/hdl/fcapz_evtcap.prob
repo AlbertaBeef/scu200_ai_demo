@@ -1,0 +1,123 @@
+{
+  "format": "fpgacapzero.probes.v1",
+  "core": "ela",
+  "sample_width": 32,
+  "sample_clock_hz": 100000000,
+  "probes": [
+    {
+      "name": "evt",
+      "width": 1,
+      "lsb": 0
+    },
+    {
+      "name": "fsin",
+      "width": 1,
+      "lsb": 1
+    },
+    {
+      "name": "wr_busy",
+      "width": 1,
+      "lsb": 2
+    },
+    {
+      "name": "wr_slot",
+      "width": 2,
+      "lsb": 3
+    },
+    {
+      "name": "wr_irq",
+      "width": 1,
+      "lsb": 5
+    },
+    {
+      "name": "dpu_busy",
+      "width": 1,
+      "lsb": 6
+    },
+    {
+      "name": "dpu_slot",
+      "width": 2,
+      "lsb": 7
+    },
+    {
+      "name": "rd_irq",
+      "width": 1,
+      "lsb": 9
+    },
+    {
+      "name": "disp_slot",
+      "width": 2,
+      "lsb": 10
+    },
+    {
+      "name": "fw_take",
+      "width": 1,
+      "lsb": 12
+    },
+    {
+      "name": "fw_dim",
+      "width": 1,
+      "lsb": 13
+    },
+    {
+      "name": "fw_infer",
+      "width": 1,
+      "lsb": 14
+    },
+    {
+      "name": "fw_overlay",
+      "width": 1,
+      "lsb": 15
+    },
+    {
+      "name": "fw_roibox",
+      "width": 1,
+      "lsb": 16
+    },
+    {
+      "name": "fw_held",
+      "width": 1,
+      "lsb": 17
+    },
+    {
+      "name": "isr",
+      "width": 1,
+      "lsb": 18
+    },
+    {
+      "name": "isr_done_slot",
+      "width": 2,
+      "lsb": 19
+    },
+    {
+      "name": "isr_next_slot",
+      "width": 2,
+      "lsb": 21
+    },
+    {
+      "name": "isr_app_rd",
+      "width": 1,
+      "lsb": 23
+    },
+    {
+      "name": "col_dpu",
+      "width": 1,
+      "lsb": 24
+    },
+    {
+      "name": "col_disp",
+      "width": 1,
+      "lsb": 25
+    },
+    {
+      "name": "fw_slot",
+      "width": 2,
+      "lsb": 26
+    },
+    {
+      "name": "isr_held_slot",
+      "width": 2,
+      "lsb": 28
+    }
+  ]
+}

@@ -1,0 +1,284 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+`timescale 1ns/1ps
+
+// Single-chain JTAG register + burst pipe.
+//
+// This keeps the existing 49-bit register protocol for normal CSR accesses,
+// then reuses the same USER chain for 256-bit packed capture reads after the
+// host writes BURST_PTR.  One BSCAN chain carries both control packets and
+// high-throughput data packets.
+//
+// A scan is a register command when it is at least 49 and fewer than BURST_W
+// shifts long; the command is the last 49 bits shifted in.  The physical
+// count is 49 plus one bit per other TAP in BYPASS on the chain (e.g. the ARM
+// DAP on Zynq UltraScale+ MPSoC), so it must not be matched exactly.  Burst
+// scans saturate the shift counter at BURST_W and never execute a command.
+//
+// When SEG_DEPTH is smaller than DEPTH, burst_ptr_in is interpreted as a
+// segment base pointer.  The low segment-offset bits must be zero; simulation
+// fails loudly on a misaligned pointer so bad host/wrapper plumbing cannot
+// silently read the wrong segment window.
+//
+// A register command also ends the preload its own Capture-DR started in
+// burst mode: the read it issues uses the same memory port, and a narrow sample
+// takes longer to preload than the 49-bit scan lasts.
+//
+// The first scan of a burst only primes the pipeline: its data were not loaded
+// yet.  With HEADER_EN it carries burst_header instead, sampled at that scan's
+// Capture-DR, so the host can check which burst it is about to read.
+//
+// tdo_next is the value tdo takes at the next tck edge (see jtag_reg_iface).
+
+module jtag_pipe_iface #(
+    parameter SAMPLE_W = 8,
+    parameter TIMESTAMP_W = 0,
+    parameter DEPTH = 1024,
+    parameter BURST_W = 256,
+    parameter SEG_DEPTH = DEPTH,
+    parameter BURST_PTR_ADDR = 16'h002C,
+    parameter HEADER_EN = 0
+) (
+    input  wire        arst,
+
+    // TAP signals (from vendor-specific wrapper)
+    input  wire        tck,
+    input  wire        tdi,
+    output wire        tdo,
+    output wire        tdo_next,
+    input  wire        capture,
+    input  wire        shift_en,
+    input  wire        update,
+    input  wire        sel,
+
+    // Register bus
+    output wire        reg_clk,
+    output wire        reg_rst,
+    output reg         reg_wr_en,
+    output reg         reg_rd_en,
+    output reg  [15:0] reg_addr,
+    output reg  [31:0] reg_wdata,
+    input  wire [31:0] reg_rdata,
+
+    // Dual-port memory read (tck domain)
+    output wire [$clog2(DEPTH)-1:0] mem_addr,
+    output wire                      mem_active,
+    input  wire [SAMPLE_W-1:0]      sample_data,
+    input  wire [((TIMESTAMP_W > 0) ? TIMESTAMP_W : 1)-1:0] timestamp_data,
+
+    // Control (tck domain, from ELA core via reg bus)
+    input  wire                      burst_start,
+    input  wire                      burst_timestamp,
+    input  wire [$clog2(DEPTH)-1:0]  burst_ptr_in,
+    // Shifted out by the priming scan when HEADER_EN; tie to 0 otherwise.
+    input  wire [BURST_W-1:0]        burst_header
+);
+
+    localparam PTR_W = $clog2(DEPTH);
+    localparam SEG_PTR_W = $clog2(SEG_DEPTH);
+    localparam TS_W_SAFE = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
+    localparam SAMPLES_PER_SCAN = BURST_W / SAMPLE_W;
+    // Without an aux lane (TIMESTAMP_W = 0) a timestamp-lane request reads
+    // samples: the lane path, its 256-bit shift mux and the wider load
+    // counter are left out.
+    localparam HAS_TS = (TIMESTAMP_W > 0);
+    localparam TS_PER_SCAN = HAS_TS ? (BURST_W / TS_W_SAFE) : SAMPLES_PER_SCAN;
+    localparam MAX_PER_SCAN = (SAMPLES_PER_SCAN > TS_PER_SCAN) ? SAMPLES_PER_SCAN : TS_PER_SCAN;
+    localparam LOAD_CTR_W = $clog2(MAX_PER_SCAN + 1);
+    localparam SHIFT_CTR_W = $clog2(BURST_W + 1);
+    localparam [LOAD_CTR_W-1:0] SAMPLES_PER_SCAN_C = SAMPLES_PER_SCAN;
+    localparam [LOAD_CTR_W-1:0] TS_PER_SCAN_C = TS_PER_SCAN;
+    localparam [SHIFT_CTR_W-1:0] REG_SCAN_BITS = 49;
+    localparam [SHIFT_CTR_W-1:0] BURST_SCAN_BITS = BURST_W;
+
+    generate
+        if (SEG_DEPTH != 0 && (SEG_DEPTH & (SEG_DEPTH - 1)) != 0) begin : g_bad_seg_depth
+            SEG_DEPTH_must_be_power_of_two invalid();
+        end
+        if (BURST_W <= 49) begin : g_bad_burst_w
+            BURST_W_must_exceed_49 invalid();
+        end
+    endgenerate
+
+    reg [BURST_W-1:0] sr;
+    // The command is the last 49 bits shifted in, which a register scan
+    // (at least 49 shifts) leaves at the top of sr.
+    wire [48:0] cmd_sr = sr[BURST_W-1 -: 49];
+    reg [BURST_W-1:0] staging;
+    reg [SEG_PTR_W-1:0] rd_off;
+    reg [SEG_PTR_W-1:0] next_off;
+    reg [PTR_W-1:0] burst_seg_base;
+    reg [LOAD_CTR_W-1:0] load_cnt;
+    reg [SHIFT_CTR_W-1:0] shift_cnt;
+    reg burst_timestamp_r;
+    reg burst_start_seen;
+    reg burst_mode;
+    reg loading;
+
+    wire [LOAD_CTR_W-1:0] words_per_scan =
+        burst_timestamp_r ? TS_PER_SCAN_C : SAMPLES_PER_SCAN_C;
+    wire [LOAD_CTR_W-1:0] start_words_per_scan =
+        (HAS_TS && burst_timestamp) ? TS_PER_SCAN_C : SAMPLES_PER_SCAN_C;
+
+    wire [PTR_W-1:0] seg_base_of_ptr;
+    wire [SEG_PTR_W-1:0] burst_ptr_off;
+    generate
+        if (SEG_DEPTH >= DEPTH) begin : g_seg_base_flat
+            assign seg_base_of_ptr = {PTR_W{1'b0}};
+            assign burst_ptr_off = burst_ptr_in;
+        end else begin : g_seg_base_split
+            assign seg_base_of_ptr = {burst_ptr_in[PTR_W-1:SEG_PTR_W], {SEG_PTR_W{1'b0}}};
+            assign burst_ptr_off = burst_ptr_in[SEG_PTR_W-1:0];
+        end
+    endgenerate
+
+`ifndef SYNTHESIS
+    generate
+        if (SEG_DEPTH < DEPTH) begin : g_seg_ptr_align_assert
+            always @(posedge tck) begin
+                if (!arst && sel && capture && (burst_start ^ burst_start_seen)) begin
+                    if (burst_ptr_in[SEG_PTR_W-1:0] != {SEG_PTR_W{1'b0}}) begin
+                        $fatal(
+                            1,
+                            "jtag_pipe_iface: burst_ptr_in 0x%0h is not aligned to SEG_DEPTH=%0d",
+                            burst_ptr_in,
+                            SEG_DEPTH
+                        );
+                    end
+                end
+            end
+        end
+    endgenerate
+`endif
+
+    assign tdo = sr[0];
+    assign tdo_next = arst ? 1'b0 :
+                      sel && capture ?
+                          ((burst_start ^ burst_start_seen) ?
+                               ((HEADER_EN != 0) ? burst_header[0] : sr[0]) :
+                           burst_mode ? staging[0] : reg_rdata[0]) :
+                      sel && shift_en ? sr[1] :
+                      sr[0];
+
+`ifndef SYNTHESIS
+    // tdo_next has to be the tdo of the next tck edge.
+    reg tdo_next_q, tdo_next_seen;
+    initial begin
+        tdo_next_q = 1'b0;
+        tdo_next_seen = 1'b0;
+    end
+    always @(posedge tck or posedge arst) begin
+        if (arst) begin
+            tdo_next_seen <= 1'b0;
+        end else begin
+            tdo_next_q <= tdo_next;
+            tdo_next_seen <= 1'b1;
+        end
+    end
+    always @(negedge tck) begin
+        if (!arst && tdo_next_seen && tdo !== tdo_next_q)
+            $fatal(1, "jtag_pipe_iface: tdo_next was %b, tdo became %b", tdo_next_q, tdo);
+    end
+`endif
+    assign reg_clk = tck;
+    assign reg_rst = arst;
+    assign mem_active = loading |
+                        (sel && capture && ((burst_start ^ burst_start_seen) || burst_mode));
+
+    generate
+        if (SEG_DEPTH >= DEPTH) begin : g_mem_addr_flat
+            assign mem_addr = rd_off;
+        end else begin : g_mem_addr_split
+            assign mem_addr = {burst_seg_base[PTR_W-1:SEG_PTR_W], rd_off};
+        end
+    endgenerate
+
+    always @(posedge tck or posedge arst) begin
+        if (arst) begin
+            sr <= {BURST_W{1'b0}};
+            staging <= {BURST_W{1'b0}};
+            rd_off <= {SEG_PTR_W{1'b0}};
+            next_off <= {SEG_PTR_W{1'b0}};
+            burst_seg_base <= {PTR_W{1'b0}};
+            load_cnt <= {LOAD_CTR_W{1'b0}};
+            shift_cnt <= {SHIFT_CTR_W{1'b0}};
+            burst_timestamp_r <= 1'b0;
+            burst_start_seen <= 1'b0;
+            burst_mode <= 1'b0;
+            loading <= 1'b0;
+            reg_wr_en <= 1'b0;
+            reg_rd_en <= 1'b0;
+            reg_addr <= 16'h0;
+            reg_wdata <= 32'h0;
+        end else begin
+            reg_wr_en <= 1'b0;
+            reg_rd_en <= 1'b0;
+
+            if (sel) begin
+                if (capture) begin
+                    shift_cnt <= {SHIFT_CTR_W{1'b0}};
+                    if (burst_start ^ burst_start_seen) begin
+                        burst_start_seen <= burst_start;
+                        burst_mode <= 1'b1;
+                        burst_seg_base <= seg_base_of_ptr;
+                        rd_off <= burst_ptr_off + start_words_per_scan - 1'b1;
+                        next_off <= burst_ptr_off + start_words_per_scan;
+                        load_cnt <= {LOAD_CTR_W{1'b0}};
+                        burst_timestamp_r <= HAS_TS && burst_timestamp;
+                        loading <= 1'b1;
+                        if (HEADER_EN != 0)
+                            sr <= burst_header;
+                    end else if (burst_mode) begin
+                        sr <= staging;
+                        rd_off <= next_off + words_per_scan - 1'b1;
+                        next_off <= next_off + words_per_scan;
+                        load_cnt <= {LOAD_CTR_W{1'b0}};
+                        loading <= 1'b1;
+                    end else begin
+                        sr[31:0] <= reg_rdata;
+                    end
+                end else if (shift_en) begin
+                    sr <= {tdi, sr[BURST_W-1:1]};
+                    if (shift_cnt != BURST_SCAN_BITS)
+                        shift_cnt <= shift_cnt + 1'b1;
+                end else if (update) begin
+                    if (shift_cnt >= REG_SCAN_BITS && shift_cnt < BURST_SCAN_BITS) begin
+                        loading <= 1'b0;
+                        if (cmd_sr[48]) begin
+                            reg_addr <= cmd_sr[47:32];
+                            reg_wdata <= cmd_sr[31:0];
+                            reg_wr_en <= 1'b1;
+                            if (cmd_sr[47:32] == BURST_PTR_ADDR)
+                                burst_mode <= 1'b1;
+                            else
+                                burst_mode <= 1'b0;
+                        end else begin
+                            reg_addr <= cmd_sr[47:32];
+                            reg_rd_en <= 1'b1;
+                            burst_mode <= 1'b0;
+                        end
+                    end
+                end
+            end
+
+            if (loading && !(sel && capture)) begin
+                if (load_cnt > 0) begin
+                    if (burst_timestamp_r)
+                        staging <= (staging << TS_W_SAFE)
+                            | {{(BURST_W-TS_W_SAFE){1'b0}}, timestamp_data};
+                    else
+                        staging <= (staging << SAMPLE_W)
+                            | {{(BURST_W-SAMPLE_W){1'b0}}, sample_data};
+                end
+                if (load_cnt == words_per_scan) begin
+                    loading <= 1'b0;
+                end else begin
+                    rd_off <= rd_off - 1'b1;
+                    load_cnt <= load_cnt + 1'b1;
+                end
+            end
+        end
+    end
+
+endmodule

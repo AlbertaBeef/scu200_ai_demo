@@ -14,6 +14,7 @@
 ******************************************************************************/
 
 #include "frmbuf.h"
+#include "fcapz_mark.h"
 #include "xparameters.h"
 #include "config.h"
 #include "xinterrupt_wrap.h"
@@ -287,6 +288,10 @@ void *FrmbufRdCallback(void *data)
 
 #define FRAME_MAX 3
 
+#ifdef FCAPZ_MARK_PRESENT
+static u32 s_fmark_b = 0;   /* last ISR marker word (fcapz build only) */
+#endif
+
 void *FrmbufWrCallback(void *data)
 {
 	Frmbuf *frmbuf = (Frmbuf *)data;
@@ -296,6 +301,9 @@ void *FrmbufWrCallback(void *data)
 
     // The frame we just finished writing
     UINTPTR completed = frmbuf->FrmbufWrBufrAddr;
+#ifdef FCAPZ_MARK_PRESENT
+    FMARK_B(s_fmark_b | FMB_ISR);
+#endif
 
     // Per-capture handoff: latch the just-completed buffer and raise the ready flag for the
     // thread-context worker (FrmbufTakeFrame). Three aligned 32-bit stores; ISR stays short.
@@ -331,6 +339,16 @@ void *FrmbufWrCallback(void *data)
 		}
 	}
 
+#ifdef FCAPZ_MARK_PRESENT
+    {
+        UINTPTR b = frmbuf->FrmbufBufrBaseAddr; u32 sz = frmbuf->FrameSizeBytes;
+        s_fmark_b = FMB_DONE(fmark_slot(b, sz, completed)) |
+                    FMB_NEXT(fmark_slot(b, sz, frmbuf->FrmbufWrBufrAddr)) |
+                    (frmbuf->AppDrivesRd ? FMB_APPRD : 0u) |
+                    FMB_HELD(fmark_slot(b, sz, frmbuf->DisplayHeldAddr));
+        FMARK_B(s_fmark_b);
+    }
+#endif
     return NULL;
 }
 

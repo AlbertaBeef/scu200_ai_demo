@@ -11,6 +11,7 @@ mbdpu03 camera read and every collision (frame-buffer writer and reader on the s
 Standard library only.
 """
 import argparse
+import gzip
 import json
 import sys
 
@@ -40,7 +41,7 @@ SIGNED_HALF_PX = ("dx", "dy")      # signed 8-bit, 0.5 px units -> px
 
 
 def load(path):
-    d = json.load(open(path))
+    d = json.load((gzip.open if path.endswith(".gz") else open)(path, "rt"))  # .json or .json.gz
     probes = {p["name"]: (p["lsb"], p["width"]) for p in d.get("probes", [])}
     if not probes:
         sys.exit("capture has no probe map - pass --probe-file to fcapz capture")

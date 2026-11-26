@@ -79,6 +79,19 @@ void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100);
 void     mnist_set_show_values(int on);
 /* 1: the background image carries the DX/DY, 0-9 and target-gauge labels (firmware skips them). */
 void     mnist_set_bg_labels(int on);
+// Overlay modes: FULL repaint (default), DELTA (only what changed), HW = a registered renderer
+// (mbpost on demo03) draws preview + bars + DX/DY gauges straight into DDR; the CPU then only
+// draws the HUD value text. HW is only selectable once mnist_ovl_set_hw() registered one.
+#define MNIST_OVL_FULL  0
+#define MNIST_OVL_DELTA 1
+#define MNIST_OVL_HW    2
+void     mnist_ovl_set_hw(void (*draw)(uintptr_t fb, int ox, int oy));
+void     mnist_ovl_set_mode(int mode);
+int      mnist_ovl_get_mode(void);
+int      mnist_ovl_has_hw(void);
+const char *mnist_ovl_mode_name(int mode);
+// dx/dy (1/100 model px) -> gauge marker offsets in screen px, clamped to the gauge half-span
+void     mnist_pos_offsets(int dx_x100, int dy_x100, int *ox, int *oy);
 void     mnist_ovl_set_delta(int on);
 int      mnist_ovl_get_delta(void);
 void     mnist_ovl_invalidate(void);

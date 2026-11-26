@@ -402,6 +402,14 @@ static void pos_fmt(char *buf, int v_x100)   /* "+1.2" / "-0.4", rounded to 0.1 
 #define POS_VAL_W  72                         /* cleared value box width (6 chars at scale 2) */
 #define POS_VAL_H  14
 
+void mnist_pos_offsets(int dx_x100, int dy_x100, int *ox, int *oy)
+{
+    const int half = POS_SPAN / 2, lim = half * 100 / POS_PPX;
+    int dx = dx_x100 > lim ? lim : (dx_x100 < -lim ? -lim : dx_x100);
+    int dy = dy_x100 > lim ? lim : (dy_x100 < -lim ? -lim : dy_x100);
+    *ox = (dx * POS_PPX) / 100; *oy = (dy * POS_PPX) / 100;
+}
+
 static void draw_pos_full(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100)
 {
     prof_start();
@@ -510,14 +518,28 @@ typedef struct {
     char      dxs[12], dys[12];
 } ovl_state_t;
 static ovl_state_t s_ovl[2];
-static int s_ovl_delta = 0;
+static int s_ovl_mode = MNIST_OVL_FULL;
+static void (*s_hw_draw)(uintptr_t fb, int ox, int oy) = 0;   /* HW renderer (mbpost) */
 
 void mnist_ovl_invalidate(void) { for (int i = 0; i < 2; i++) s_ovl[i].live_ok = s_ovl[i].pos_ok = 0; }
-void mnist_ovl_set_delta(int on) { s_ovl_delta = on ? 1 : 0; mnist_ovl_invalidate(); }
+void mnist_ovl_set_mode(int mode)
+{
+    if (mode == MNIST_OVL_HW && !s_hw_draw) mode = MNIST_OVL_FULL;
+    if (mode < MNIST_OVL_FULL || mode > MNIST_OVL_HW) mode = MNIST_OVL_FULL;
+    s_ovl_mode = mode; mnist_ovl_invalidate();
+}
+int  mnist_ovl_get_mode(void) { return s_ovl_mode; }
+int  mnist_ovl_has_hw(void)   { return s_hw_draw != 0; }
+const char *mnist_ovl_mode_name(int mode)
+{
+    return mode == MNIST_OVL_HW ? "mbpost" : (mode == MNIST_OVL_DELTA ? "delta" : "full");
+}
+void mnist_ovl_set_hw(void (*draw)(uintptr_t fb, int ox, int oy)) { s_hw_draw = draw; }
+void mnist_ovl_set_delta(int on) { mnist_ovl_set_mode(on ? MNIST_OVL_DELTA : MNIST_OVL_FULL); }
 /* Show/hide the numeric values (gauges and labels stay). Forces a full repaint of the DX/DY
  * area in both buffers; the caller repaints the target gauge (mnist_target_gauge). */
 void mnist_set_show_values(int on) { s_show_vals = on ? 1 : 0; mnist_ovl_invalidate(); }
-int  mnist_ovl_get_delta(void)   { return s_ovl_delta; }
+int  mnist_ovl_get_delta(void)   { return s_ovl_mode == MNIST_OVL_DELTA; }
 
 static ovl_state_t *ovl_slot(uintptr_t fb)
 {
@@ -554,8 +576,9 @@ void mnist_draw_live(uintptr_t fb, uint32_t stride, const int8_t *img28, const i
 {
     ovl_state_t *st = ovl_slot(fb);
     int len[10], arg;
+    if (s_ovl_mode == MNIST_OVL_HW) return;            /* mbpost draws it (mnist_draw_pos) */
     bar_logits(logits, len, &arg);
-    if (!s_ovl_delta || !st->live_ok) {
+    if (s_ovl_mode != MNIST_OVL_DELTA || !st->live_ok) {
         draw_live_full(fb, stride, img28, logits);
         for (int i = 0; i < 10; i++) st->bar_len[i] = (int16_t)len[i];
         st->arg = (int8_t)arg; st->live_ok = 1;
@@ -619,7 +642,24 @@ static void pos_value(uintptr_t fb, uint32_t stride, int xc, int y, const char *
 void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100)
 {
     ovl_state_t *st = ovl_slot(fb);
-    if (!s_ovl_delta || !st->pos_ok) {
+    if (s_ovl_mode == MNIST_OVL_HW) {
+        /* mbpost renders preview + bars + DX/DY gauges into DDR (no CPU cache involved); the CPU
+         * only keeps the HUD value text (drawn/cleared when it changes, flushed). */
+        prof_start();
+        int ox, oy;
+        mnist_pos_offsets(dx_x100, dy_x100, &ox, &oy);
+        s_hw_draw(fb, ox, oy);
+        prof_mark(1);
+        char v[12];
+        if (s_show_vals) pos_fmt(v, dx_x100); else v[0] = 0;
+        pos_value(fb, stride, ROI_X + POS_SPAN/2, POS_DXV_Y, v, st->dxs, 0x22E6E6u);
+        if (s_show_vals) pos_fmt(v, dy_x100); else v[0] = 0;
+        pos_value(fb, stride, POS_DYV_C, POS_DYV_Y, v, st->dys, 0x22E6E6u);
+        prof_mark(3);
+        s_prof_n++;
+        return;
+    }
+    if (s_ovl_mode != MNIST_OVL_DELTA || !st->pos_ok) {
         draw_pos_full(fb, stride, dx_x100, dy_x100);
         if (s_show_vals) { pos_fmt(st->dxs, dx_x100); pos_fmt(st->dys, dy_x100); }
         else             { st->dxs[0] = 0; st->dys[0] = 0; }

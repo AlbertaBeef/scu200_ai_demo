@@ -285,6 +285,15 @@ XV_FrmbufRd_l2     BgFrmbufRd;
 #define BG_IMG_ORIG  0xB4000000u   /* pristine background image (JTAG-loaded; SW never draws here) */
 #define BG_IMG_BUF   0xB5000000u   /* working front buffer (copied from ORIG at boot) */
 #define BG_IMG_BUF_B 0xB6000000u   /* working back buffer for double-buffered overlay */
+/* mbpost (demo03): HLS overlay renderer - preview + logit bars + DX/DY gauges drawn into DDR */
+#if defined(XPAR_MBPOST_S_AXI_CONTROL_BASEADDR)
+#  define MBPOST_BASE XPAR_MBPOST_S_AXI_CONTROL_BASEADDR
+#elif defined(XPAR_MBPOST_BASEADDR)
+#  define MBPOST_BASE XPAR_MBPOST_BASEADDR
+#endif
+#ifdef MBPOST_BASE
+static void mbpost_cb(uintptr_t fb, int ox, int oy);
+#endif
 /* Overlay double-buffering: the per-capture worker draws the ROI+bars into the BACK buffer,
  * flushes it, then pageflips bg_frmbuf_rd to it (takes effect at the next frame boundary), so
  * the scanout never sees a half-drawn panel. Both buffers hold the same image + static labels
@@ -452,8 +461,12 @@ static int mnist_crop_key(int ch)
                          g_auto_tgt ? "ON" : "off"); return 1;
 #endif
 #ifdef STATS_ENABLE
-    case 'u': mnist_ovl_set_delta(!mnist_ovl_get_delta());   /* overlay: full / delta redraw */
-              xil_printf("overlay: %s redraw\r\n", mnist_ovl_get_delta() ? "delta" : "full"); return 1;
+    case 'u': { int m = mnist_ovl_get_mode();       /* overlay: [mbpost ->] full -> delta -> ... */
+                m = (m == MNIST_OVL_HW) ? MNIST_OVL_FULL
+                  : (m == MNIST_OVL_FULL) ? MNIST_OVL_DELTA
+                  : (mnist_ovl_has_hw() ? MNIST_OVL_HW : MNIST_OVL_FULL);
+                mnist_ovl_set_mode(m);
+                xil_printf("overlay: %s\r\n", mnist_ovl_mode_name(mnist_ovl_get_mode())); } return 1;
     case 'h': g_hud_on = !g_hud_on;                 /* toggle stats panel + ROI box together */
               if (!g_hud_on) hud_clear_panel();     /* black out the panel (ROI box clears on next frame) */
               mnist_set_show_values(g_hud_on);      /* DX/DY + TGT numbers follow the HUD */
@@ -525,7 +538,7 @@ static int mnist_crop_key(int ch)
                   for (int i = 0; i < MNIST_OVL_PROF_N; i++) sum += pt[i];
                   if (n == 0) n = 1;
                   xil_printf("overlay (%s, n=%lu) avg us: preview=%lu bars=%lu live_flush=%lu pos=%lu pos_flush=%lu total=%lu\r\n",
-                             mnist_ovl_get_delta() ? "delta" : "full", (unsigned long)n,
+                             mnist_ovl_mode_name(mnist_ovl_get_mode()), (unsigned long)n,
                              (unsigned long)(pt[0]/tpu/n), (unsigned long)(pt[1]/tpu/n), (unsigned long)(pt[2]/tpu/n),
                              (unsigned long)(pt[3]/tpu/n), (unsigned long)(pt[4]/tpu/n), (unsigned long)(sum/tpu/n)); }
 #endif
@@ -1903,6 +1916,12 @@ int main() {
 #endif
 #if defined(MBDPU03_CORE)
 	mnist_set_input_dim(MBDPU03_DIM);
+#if defined(MBPOST_BASE) && defined(XPAR_BG_FRMBUF_RD_BASEADDR)
+	mnist_ovl_set_hw(mbpost_cb);                /* overlay drawn by mbpost (default; 'u' cycles) */
+	mnist_ovl_set_mode(MNIST_OVL_HW);
+	xil_printf("mbpost overlay renderer @0x%08x: overlay mode %s\n\r", (unsigned)MBPOST_BASE,
+	           mnist_ovl_mode_name(mnist_ovl_get_mode()));
+#endif
 	xil_printf("mbdpu03 112x112 MNIST classifier + dx/dy position head ready (camera crop in core): "
 	           "ctrl 0x%08x, weights @0x%08x/0x%08x\n\r",
 #elif defined(MBDPU_HAS_POS)
@@ -2224,3 +2243,14 @@ int main() {
 
 	return 0;
 }
+
+#ifdef MBPOST_BASE
+/* mbpost renderer callback (registered with mnist_ovl_set_hw): draws the overlay for the latest
+ * inference (mbdpu03's img write-back + logits in DDR) into back buffer fb, composed over the
+ * pristine background, and waits for it (~1 ms). */
+static void mbpost_cb(uintptr_t fb, int ox, int oy)
+{
+	mbpost_draw(MBPOST_BASE, 0xB0020000u /* MBDPU01_IMG */, 0xB0030000u /* MBDPU01_OUT */,
+	            BG_IMG_ORIG, fb, (u32)(VMODE_WIDTH*3u), ox, oy);
+}
+#endif

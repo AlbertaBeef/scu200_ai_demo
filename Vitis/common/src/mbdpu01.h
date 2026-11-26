@@ -84,6 +84,28 @@ int  mbdpu02_infer(uint32_t base, uint64_t wblob, uint64_t pblob,
 #define MBDPU03_PBLOB_POSK   108u        // pblob index: px*100 multiplier (112-px units)
 #define MBDPU03_PBLOB_POSH   109u        // pblob index: shift
 
+// ---- mbpost (scu200_ai_demo03): HLS overlay renderer --------------------------------------
+// Draws the ROI preview (mbdpu03's 112x112 img), the 10 logit bars (out[0..9]) and the DX/DY
+// gauges (marker offsets ox/oy in screen px) into frame buffer fb, composed over the pristine
+// background bg. Pure DDR traffic: no CPU cache maintenance needed for fb (the CPU must not hold
+// dirty lines in those regions). Register map from the generated xmbpost_hw.h.
+#define MBPOST_AP_CTRL   0x00u
+#define MBPOST_IMG_LO    0x10u
+#define MBPOST_IMG_HI    0x14u
+#define MBPOST_OUT_LO    0x1Cu
+#define MBPOST_OUT_HI    0x20u
+#define MBPOST_BG_LO     0x28u
+#define MBPOST_BG_HI     0x2Cu
+#define MBPOST_FB_LO     0x34u
+#define MBPOST_FB_HI     0x38u
+#define MBPOST_STRIDE    0x40u
+#define MBPOST_OX        0x48u
+#define MBPOST_OY        0x50u
+void mbpost_start(uint32_t base, uint64_t img, uint64_t out, uint64_t bg, uint64_t fb,
+                  uint32_t stride, int32_t ox, int32_t oy);
+void mbpost_draw(uint32_t base, uint64_t img, uint64_t out, uint64_t bg, uint64_t fb,
+                 uint32_t stride, int32_t ox, int32_t oy);   /* start + poll ap_done */
+
 // Blocking inference on mbdpu03 straight from a camera frame: the core crops (x0,y0, zoom
 // blk_shift), converts to 0..127 (no invert: the model is trained inverted), writes the 112x112
 // input back to img, and runs the CNN. Weights are cached on chip; they are (re)loaded on the

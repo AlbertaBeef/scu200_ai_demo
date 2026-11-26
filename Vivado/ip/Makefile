@@ -63,6 +63,7 @@ ip: $(SETTINGS_TCL)
 	BOARD_NAME=$(BOARD_NAME) $(HLS) mbdpu01/run_hls.tcl
 	BOARD_NAME=$(BOARD_NAME) $(HLS) mbdpu02/run_hls.tcl
 	BOARD_NAME=$(BOARD_NAME) $(HLS) mbdpu03/run_hls.tcl
+	BOARD_NAME=$(BOARD_NAME) $(HLS) mbpost/run_hls.tcl
 	touch $(DONE_FILE)
 
 .PHONY: clean

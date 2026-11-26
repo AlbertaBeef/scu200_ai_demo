@@ -760,8 +760,8 @@ connect_bd_net [get_bd_pins main_resetn_gpio/gpio_io_o] [get_bd_pins reset_v_tpg
 connect_bd_net [get_bd_pins main_resetn_gpio/gpio_io_o] [get_bd_pins reset_v_mix/Din]
 lappend periph_ports [list "main_resetn_gpio/S_AXI" "clk_wiz/clk_100M" "rst_clk_wiz_100M/peripheral_aresetn"]
 
-# Reconfigure the DDR AXI SmartConnect to accommodate the Frame Buffers + bg reader + mbdpu03
-set smartcon_ports [expr {$num_cams+4}]
+# Reconfigure the DDR AXI SmartConnect to accommodate the Frame Buffers + bg reader + mbdpu03 + mbpost
+set smartcon_ports [expr {$num_cams+5}]
 set_property -dict [list \
   CONFIG.NUM_SI $smartcon_ports \
   CONFIG.NUM_CLKS {3} \
@@ -850,6 +850,21 @@ connect_bd_net [get_bd_pins clk_wiz/clk_100M] [get_bd_pins mbdpu03/ap_clk]
 connect_bd_net [get_bd_pins rst_clk_wiz_100M/peripheral_aresetn] [get_bd_pins mbdpu03/ap_rst_n]
 lappend periph_ports [list "mbdpu03/s_axi_control" "clk_wiz/clk_100M" "rst_clk_wiz_100M/peripheral_aresetn"]
 lappend intr_list "mbdpu03/interrupt"
+
+#########################################################
+# mbpost - overlay renderer (HLS core xilinx.com:hls:mbpost:1.0). After each inference it reads
+# mbdpu03's 112x112 input + logits and draws the ROI preview, the 10 logit bars and the DX/DY
+# gauges straight into the HDMI background back buffer in DDR (composed over the pristine
+# background image), replacing ~42 ms of MicroBlaze drawing with ~1 ms of burst AXI traffic.
+# m_axi_gmem -> next free axi_smc SI (100 MHz), s_axi_control + interrupt via MB periph bus.
+#########################################################
+incr smartcon_index
+set mbpost [ create_bd_cell -type ip -vlnv xilinx.com:hls:mbpost:1.0 mbpost ]
+connect_bd_intf_net [get_bd_intf_pins mbpost/m_axi_gmem] [get_bd_intf_pins axi_smc/S0${smartcon_index}_AXI]
+connect_bd_net [get_bd_pins clk_wiz/clk_100M] [get_bd_pins mbpost/ap_clk]
+connect_bd_net [get_bd_pins rst_clk_wiz_100M/peripheral_aresetn] [get_bd_pins mbpost/ap_rst_n]
+lappend periph_ports [list "mbpost/s_axi_control" "clk_wiz/clk_100M" "rst_clk_wiz_100M/peripheral_aresetn"]
+lappend intr_list "mbpost/interrupt"
 
 #########################################################
 # Motor control — DC Motor 15 Click (DRV8874) on CLICK1, quad encoder tap on CLICK2

@@ -59,7 +59,7 @@ list; this file is the annotated version.
 | Key | Action |
 |-----|--------|
 | `h` | HUD on/off: stats panel, ROI box, and the numeric DX/DY and target values (gauges and labels always shown; default off). On demo03 the DX/DY, 0–9 and "Target Offset" labels are part of the background image; the target value sits right of its gauge track |
-| `u` | Overlay redraw: full (default) / delta (repaint only what changed). `B` prints per-stage overlay timing |
+| `u` | Overlay renderer, cycles **mbpost → full → delta**. demo03 boots in **mbpost** (HLS core draws the preview, logit bars and DX/DY gauges straight into DDR, ~1 ms); full/delta are the MicroBlaze paths (demo01/02 have only full/delta, default full). `B` prints per-stage overlay timing (in mbpost mode `bars` = the mbpost run, `pos` = HUD value text) |
 | `v` | verbose console (1 Hz stats line) on/off |
 | `?` | print this key list |
 

@@ -130,3 +130,27 @@ int mbdpu03_infer(uint32_t base, uint64_t wblob, uint64_t pblob, uint64_t img, u
     }
     return (int)o[10];
 }
+
+void mbpost_start(uint32_t base, uint64_t img, uint64_t out, uint64_t bg, uint64_t fb,
+                  uint32_t stride, int32_t ox, int32_t oy)
+{
+    Xil_Out32(base + MBPOST_IMG_LO, (uint32_t)(img & 0xFFFFFFFFu));
+    Xil_Out32(base + MBPOST_IMG_HI, (uint32_t)(img >> 32));
+    Xil_Out32(base + MBPOST_OUT_LO, (uint32_t)(out & 0xFFFFFFFFu));
+    Xil_Out32(base + MBPOST_OUT_HI, (uint32_t)(out >> 32));
+    Xil_Out32(base + MBPOST_BG_LO,  (uint32_t)(bg & 0xFFFFFFFFu));
+    Xil_Out32(base + MBPOST_BG_HI,  (uint32_t)(bg >> 32));
+    Xil_Out32(base + MBPOST_FB_LO,  (uint32_t)(fb & 0xFFFFFFFFu));
+    Xil_Out32(base + MBPOST_FB_HI,  (uint32_t)(fb >> 32));
+    Xil_Out32(base + MBPOST_STRIDE, stride);
+    Xil_Out32(base + MBPOST_OX,     (uint32_t)ox);
+    Xil_Out32(base + MBPOST_OY,     (uint32_t)oy);
+    Xil_Out32(base + MBPOST_AP_CTRL, 0x1u);                 /* ap_start */
+}
+
+void mbpost_draw(uint32_t base, uint64_t img, uint64_t out, uint64_t bg, uint64_t fb,
+                 uint32_t stride, int32_t ox, int32_t oy)
+{
+    mbpost_start(base, img, out, bg, fb, stride, ox, oy);
+    while (((Xil_In32(base + MBPOST_AP_CTRL) >> 1) & 0x1u) == 0u) { }   /* ap_done */
+}

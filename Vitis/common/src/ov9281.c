@@ -191,6 +191,16 @@ int ov9281_set_gain(uint8_t iic_id, uint32_t gain_x16)
     return XST_SUCCESS;
 }
 
+/* Frame length in lines (0x380E/0x380F). See ov9281.h. */
+int ov9281_set_vts(uint8_t iic_id, uint32_t vts)
+{
+    int s;
+    IicReset(iic_id);   /* SCU200 camera I2C is flaky; clean the bus so the polled write can't hang */
+    if ((s = ov9281_write(iic_id, 0x380e, (vts >> 8) & 0xFF)) != XST_SUCCESS) return s;
+    if ((s = ov9281_write(iic_id, 0x380f,  vts       & 0xFF)) != XST_SUCCESS) return s;
+    return XST_SUCCESS;
+}
+
 /* Switch FSIN external-trigger mode on/off. See ov9281.h. */
 int ov9281_set_trigger_mode(uint8_t iic_id, int enable)
 {

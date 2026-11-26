@@ -69,6 +69,22 @@ void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
 // its area and cache-flushes it; call on the back buffer each capture (like mnist_draw_live).
 void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100);
 
+// Overlay drawing mode and profiling. Delta mode (off by default) repaints only what changed
+// since the last draw into the same buffer; mnist_ovl_invalidate forces the next draw of each
+// buffer to be a full repaint. mnist_set_tick supplies a free-running tick counter;
+// mnist_ovl_prof copies + clears the per-stage tick sums and returns the number of draws.
+#define MNIST_OVL_PROF_N 5   // 0 preview, 1 bars, 2 live flush, 3 pos draw, 4 pos flush
+// Numeric DX/DY and TGT values on/off (default off; follows the HUD 'h' key). Gauges and their
+// labels are always drawn. Forces a full DX/DY repaint; redraw the target gauge after calling.
+void     mnist_set_show_values(int on);
+/* 1: the background image carries the DX/DY, 0-9 and target-gauge labels (firmware skips them). */
+void     mnist_set_bg_labels(int on);
+void     mnist_ovl_set_delta(int on);
+int      mnist_ovl_get_delta(void);
+void     mnist_ovl_invalidate(void);
+void     mnist_set_tick(uint32_t (*fn)(void));
+uint32_t mnist_ovl_prof(uint32_t out[MNIST_OVL_PROF_N]);
+
 #define ROI_CAP_DIM 112   // captured hi-res crop side (for training data)
 
 // Capture the current crop region (side x side, from the live camera frame) resampled by

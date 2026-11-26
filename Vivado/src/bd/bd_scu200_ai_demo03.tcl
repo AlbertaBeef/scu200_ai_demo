@@ -922,14 +922,17 @@ lappend periph_ports [list "disc_strobe/s_axi_ctrl" "clk_wiz/clk_100M" "rst_clk_
 # fsin_frame_tag — drop the OV9281 wake frame in FSIN-trigger mode
 #########################################################
 # In FSIN-trigger mode the OV9281 sends two frames per strobe: a dim wake frame whose
-# SOF arrives ~1.06 ms after FSIN, then the good frame at ~26.05 ms (fcapz capture).
-# fsin_frame_tag (src/hdl/fsin_frame_tag.v) sits between subset_conv_0 and v_frmbuf_wr
-# and, when drop_en = 1, sinks every frame whose SOF comes < DROP_WINDOW after FSIN, so
-# frmbuf_wr only writes (and interrupts on) the good frame. Runs on the 300 MHz video
-# clock: DROP_WINDOW = 13 ms = 3_900_000 cycles.
-#  fsin_tag_gpio ch1[0]  (out) drop_en        - firmware sets it with the FSIN trigger
-#  fsin_tag_gpio ch2[31:0] (in) dropped_count - frames dropped (300 MHz counter, read
-#                                               for diagnostics only)
+# SOF arrives ~1.06 ms after FSIN, then the good frame one sensor frame (VTS) later
+# (~26.05 ms at the default VTS; fcapz capture). fsin_frame_tag (src/hdl/fsin_frame_tag.v)
+# sits between subset_conv_0 and v_frmbuf_wr and, when CTRL.drop_en = 1, sinks every frame
+# whose SOF comes < the drop window after FSIN, so frmbuf_wr only writes (and interrupts
+# on) the good frame. Runs on the 300 MHz video clock; default window DROP_WINDOW = 13 ms
+# = 3_900_000 cycles, which the firmware overrides when it shortens VTS.
+# Its AXI4-Lite register block (CTRL, DROP_WINDOW, FSIN/drop counters, last SOF delay and
+# frame tag) hangs off mipi_0's video-clock SmartConnect (axi_int_video M02), pinned at
+# FSIN_TAG_ADDR below so the firmware has a fixed address even if the module reference
+# is not listed in xparameters.h.
+set fsin_tag_addr 0x44A80000
 add_files -norecurse -fileset sources_1 \
     [file normalize [file join [file dirname [info script]] .. hdl fsin_frame_tag.v]]
 set fsin_tag [ create_bd_cell -type module -reference fsin_frame_tag mipi_0/fsin_tag ]
@@ -939,30 +942,13 @@ connect_bd_intf_net [get_bd_intf_pins mipi_0/subset_conv_0/M_AXIS] [get_bd_intf_
 connect_bd_intf_net [get_bd_intf_pins mipi_0/fsin_tag/m_axis]      [get_bd_intf_pins mipi_0/v_frmbuf_wr/s_axis_video]
 connect_bd_net [get_bd_pins mipi_0/video_aclk]    [get_bd_pins mipi_0/fsin_tag/aclk]
 connect_bd_net [get_bd_pins mipi_0/video_aresetn] [get_bd_pins mipi_0/fsin_tag/aresetn]
+set_property CONFIG.NUM_MI {3} [get_bd_cells mipi_0/axi_int_video]
+connect_bd_intf_net [get_bd_intf_pins mipi_0/axi_int_video/M02_AXI] [get_bd_intf_pins mipi_0/fsin_tag/S_AXI]
 create_bd_pin -dir I mipi_0/fsin
-create_bd_pin -dir I mipi_0/fsin_drop_en
-create_bd_pin -dir O -from 31 -to 0 mipi_0/fsin_dropped_count
 create_bd_pin -dir O mipi_0/fsin_frame_early
 connect_bd_net [get_bd_pins mipi_0/fsin]         [get_bd_pins mipi_0/fsin_tag/fsin_async]
-connect_bd_net [get_bd_pins mipi_0/fsin_drop_en] [get_bd_pins mipi_0/fsin_tag/drop_en]
-connect_bd_net [get_bd_pins mipi_0/fsin_tag/dropped_count]    [get_bd_pins mipi_0/fsin_dropped_count]
 connect_bd_net [get_bd_pins mipi_0/fsin_tag/last_frame_early] [get_bd_pins mipi_0/fsin_frame_early]
 connect_bd_net [get_bd_pins disc_strobe/xvs] [get_bd_pins mipi_0/fsin]
-
-set fsin_tag_gpio [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio fsin_tag_gpio ]
-set_property -dict [list \
-  CONFIG.C_GPIO_WIDTH {1} \
-  CONFIG.C_ALL_OUTPUTS {1} \
-  CONFIG.C_DOUT_DEFAULT {0x00000000} \
-  CONFIG.C_IS_DUAL {1} \
-  CONFIG.C_GPIO2_WIDTH {32} \
-  CONFIG.C_ALL_INPUTS_2 {1} \
-] $fsin_tag_gpio
-connect_bd_net [get_bd_pins clk_wiz/clk_100M]                    [get_bd_pins fsin_tag_gpio/s_axi_aclk]
-connect_bd_net [get_bd_pins rst_clk_wiz_100M/peripheral_aresetn] [get_bd_pins fsin_tag_gpio/s_axi_aresetn]
-connect_bd_net [get_bd_pins fsin_tag_gpio/gpio_io_o] [get_bd_pins mipi_0/fsin_drop_en]
-connect_bd_net [get_bd_pins mipi_0/fsin_dropped_count] [get_bd_pins fsin_tag_gpio/gpio2_io_i]
-lappend periph_ports [list "fsin_tag_gpio/S_AXI" "clk_wiz/clk_100M" "rst_clk_wiz_100M/peripheral_aresetn"]
 
 # scu200_ai_demo03_fcapz: add the fcapz event-timeline capture (marker GPIO + ELA).
 # The plain demo03 target never sets fcapz_en, so its design is unchanged.
@@ -1015,7 +1001,9 @@ foreach intr $intr_list {
   set intr_index [expr {$intr_index+1}]
 }
 
-# Assign addresses
+# Assign addresses (fsin_tag first, at its fixed address; then everything else)
+assign_bd_address -offset $fsin_tag_addr -range 4K \
+    [get_bd_addr_segs -of_objects [get_bd_intf_pins mipi_0/fsin_tag/S_AXI]]
 assign_bd_address
 
 

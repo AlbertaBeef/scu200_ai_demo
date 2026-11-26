@@ -78,16 +78,29 @@
 #include "disc_strobe.h" /* motor variant only: encoder decode + angle strobe (guarded by DISC_STROBE_PRESENT) */
 #include "ov9281.h"   /* for the FSIN trigger-mode toggle wired to the disc_strobe 'F' key */
 #include "fcapz_mark.h" /* fcapz timeline markers (no-ops unless the fcapz_mark GPIO exists) */
-/* fsin_frame_tag (PL, in front of v_frmbuf_wr): with drop_en set it discards the OV9281
- * wake frame (SOF < 13 ms after FSIN), so frmbuf_wr only writes the good frame per strobe.
- * GPIO ch1[0] = drop_en, ch2 = dropped-frame counter. */
-#ifdef XPAR_FSIN_TAG_GPIO_BASEADDR
+/* fsin_frame_tag (PL, in front of v_frmbuf_wr): with CTRL.drop_en set it discards the OV9281
+ * wake frame (SOF < drop window after FSIN), so frmbuf_wr only writes the good frame per
+ * strobe. AXI4-Lite registers (src/hdl/fsin_frame_tag.v); the BD pins the block at
+ * 0x44A80000 in case the module reference is missing from xparameters.h. */
+#if defined(XPAR_MIPI_0_FSIN_TAG_BASEADDR)
+#define FSIN_TAG_BASE XPAR_MIPI_0_FSIN_TAG_BASEADDR
+#elif defined(XPAR_MBDPU03_BASEADDR) || defined(XPAR_MBDPU03_S_AXI_CONTROL_BASEADDR) /* every demo03 build has it */
+#define FSIN_TAG_BASE 0x44A80000u
+#endif
+#ifdef FSIN_TAG_BASE
 #define FSIN_TAG_PRESENT 1
-#define FSIN_TAG_SET_DROP(en) Xil_Out32(XPAR_FSIN_TAG_GPIO_BASEADDR + 0x0u, (en) ? 1u : 0u)
-#define FSIN_TAG_DROPPED()    Xil_In32(XPAR_FSIN_TAG_GPIO_BASEADDR + 0x8u)
+#define FTAG_CTRL        0x00u   /* [0] drop_en, [1] clear counters (W1, self-clearing) */
+#define FTAG_WINDOW      0x04u   /* drop window, 300 MHz cycles (0 = 13 ms default) */
+#define FTAG_FSIN_COUNT  0x08u
+#define FTAG_DROPPED     0x0Cu
+#define FTAG_SOF_DELAY   0x10u   /* cycles FSIN -> latest SOF */
+#define FTAG_LAST_FRAME  0x14u   /* [7:0] index in strobe, [8] early */
+#define FTAG_ID          0x1Cu   /* 0x46544101 */
+#define FSIN_TAG_WR(o, v) Xil_Out32(FSIN_TAG_BASE + (o), (u32)(v))
+#define FSIN_TAG_RD(o)    Xil_In32(FSIN_TAG_BASE + (o))
 #else
-#define FSIN_TAG_SET_DROP(en) ((void)(en))
-#define FSIN_TAG_DROPPED()    0u
+#define FSIN_TAG_WR(o, v) ((void)(v))
+#define FSIN_TAG_RD(o)    0u
 #endif
 
 #if defined(DISC_STROBE_PRESENT)
@@ -104,6 +117,21 @@ static uint32_t g_tchg_rev = 0, g_tchg_from = 0, g_tchg_to = 0;
 static int      g_tchg_wrap = 0, g_tchg_valid = 0;
 static uint32_t g_cam_wd_count = 0;     /* watchdog re-inits since boot */
 
+/* Trigger-mode frame length (q key) and PL wake-frame drop (Q key). The wake frame's SOF
+ * comes ~1.06 ms after FSIN and the good frame's one VTS later (~18.2 us/line), so the drop
+ * window is put half a frame period after the wake SOF. Free-run always uses the default VTS. */
+static const uint16_t k_trig_vts[] = { OV9281_VTS_DEFAULT, 1024, 800, 640, 544 };
+#define TRIG_VTS_N (sizeof(k_trig_vts) / sizeof(k_trig_vts[0]))
+static unsigned g_trig_vts_i = 0;
+static int      g_pl_drop    = 1;
+static uint32_t trig_vts(void) { return k_trig_vts[g_trig_vts_i]; }
+static uint32_t fsin_drop_window_us(void) { return 1060u + (trig_vts() * 182u) / 20u; }
+static void fsin_tag_apply(void)
+{
+    FSIN_TAG_WR(FTAG_WINDOW, fsin_drop_window_us() * 300u);   /* 300 MHz video clock */
+    FSIN_TAG_WR(FTAG_CTRL, (g_trig_active && g_pl_drop) ? 1u : 0u);
+}
+
 static void ov9281_fsin_trigger_cb(int enable)
 {
     if (!g_ov9281_present) return;
@@ -113,11 +141,12 @@ static void ov9281_fsin_trigger_cb(int enable)
      * after. Not a software-fixable event (masking the VPHY clock-detector removed the internal
      * TX-restart but the sink still re-syncs) -- it's a fabric-level coupling between the camera
      * pipe and the v_mix master feeding HDMI. A true fix needs a block-design change. Left as-is. */
+    ov9281_set_vts(g_ov9281_iic, enable ? trig_vts() : OV9281_VTS_DEFAULT);
     ov9281_set_trigger_mode(g_ov9281_iic, enable);
-    FSIN_TAG_SET_DROP(enable);   /* trigger mode: drop the wake frame in the PL */
     /* In trigger mode the worker drives the camera display so it can drop the dim wake frame;
      * in free-run the DONE ISR drives it (smooth). */
     g_trig_active = enable ? 1 : 0;
+    fsin_tag_apply();            /* trigger mode: drop the wake frame in the PL */
     if (g_cam_frmbuf) {
         g_cam_frmbuf->AppDrivesRd = (u8)(enable ? 1 : 0);
         if (!enable) g_cam_frmbuf->DisplayHeldAddr = 0;   /* release the hold -> ISR uses all slots */
@@ -155,6 +184,7 @@ static void cam_watchdog(void)
     ov9281_config(c->iic_id, c->gpio, c->gpio_mask);   /* gpio reset + soft reset + mode + stream */
     ov9281_set_exposure(c->iic_id, g_exposure);
     ov9281_set_gain(c->iic_id, g_gain);
+    ov9281_set_vts(c->iic_id, trig_vts());
     ov9281_set_trigger_mode(c->iic_id, 1);
     xil_printf("cam: watchdog re-init done\r\n");
     last_seq = g_cam_frmbuf->FrameSeq; last_rev = disc_strobe_revs();
@@ -284,6 +314,7 @@ static uintptr_t g_bg_back  = BG_IMG_BUF_B;
 #else
 #define RT_FREQ_HZ 100000000u
 #endif
+static uint32_t rt_tick(void) { return Xil_In32(RT_BASE + RT_TCR); }   /* overlay profiling */
 #define STAT_PANEL_X 815      /* in the free gap between the two 640-wide camera windows */
 #define STAT_PANEL_Y 515
 #define STAT_PANEL_W 230      /* must match mnist_stats_panel() W/H */
@@ -291,6 +322,7 @@ static uintptr_t g_bg_back  = BG_IMG_BUF_B;
 #define TGT_GAUGE_X  1300     /* compact target/AUTO gauge, between digit-9's bar (ends y~864) and */
 #define TGT_GAUGE_Y  906      /* the background's "Classification" title (y 990 over these columns). */
 #define TGT_GAUGE_W  192      /* Mid tick at x0+(w-1)/2 ~ 1395 = DX centre tick (ROI_X 1340 + 56). */
+static int g_tgt_redraw = 1;  /* force the TGT/AUTO gauge repaint (set when the HUD comes on) */
 static int g_hud_on = 0;      /* 'h' toggles the stats panel + ROI box together; default OFF */
 static int g_verbose = 1;     /* 'v' toggles a 1/sec one-line console dump of the panel; default ON */
 static void hud_clear_panel(void);  /* fwd decl: used by the 'h' key handler above its definition */
@@ -420,8 +452,12 @@ static int mnist_crop_key(int ch)
                          g_auto_tgt ? "ON" : "off"); return 1;
 #endif
 #ifdef STATS_ENABLE
+    case 'u': mnist_ovl_set_delta(!mnist_ovl_get_delta());   /* overlay: full / delta redraw */
+              xil_printf("overlay: %s redraw\r\n", mnist_ovl_get_delta() ? "delta" : "full"); return 1;
     case 'h': g_hud_on = !g_hud_on;                 /* toggle stats panel + ROI box together */
               if (!g_hud_on) hud_clear_panel();     /* black out the panel (ROI box clears on next frame) */
+              mnist_set_show_values(g_hud_on);      /* DX/DY + TGT numbers follow the HUD */
+              g_tgt_redraw = 1;                     /* (gauges + labels always shown) */
               xil_printf("hud: %s\r\n", g_hud_on ? "ON" : "off"); return 1;
     case 'v': g_verbose = !g_verbose;               /* toggle the 1/sec console stats line */
               xil_printf("verbose: %s\r\n", g_verbose ? "ON" : "off"); return 1;
@@ -437,8 +473,8 @@ static int mnist_crop_key(int ch)
         xil_printf("Motor Encoder: c enc-check\r\n");
         xil_printf("Strobe:  S arm/disarm | F FSIN trigger | N captures/rev (1/2/4/8/16) | T/G target +-5 | C/V cpr +-0.1 (drift-null) | Y status\r\n");
         xil_printf("Crop:    z/x zoom in/out | j/l pan L/R | i/k pan U/D | o recenter\r\n");
-        xil_printf("Camera:  ]/[ gain +-0.5x | ./, exposure +-256\r\n");
-        xil_printf("Overlay: h HUD+ROI on/off | v verbose console on/off | ? this help\r\n");
+        xil_printf("Camera:  ]/[ gain +-0.5x | ./, exposure +-256 | q trigger VTS 1373/1024/800/640/544 | Q PL wake-frame drop\r\n");
+        xil_printf("Overlay: h HUD (stats, ROI box, DX/DY + TGT values) on/off | u full/delta redraw | v verbose console on/off | ? this help\r\n");
         xil_printf("Capture: w record ROI training data on/off (fills DDR gallery for JTAG dump)\r\n");
 #ifdef MBDPU_HAS_POS
         xil_printf("Position: A auto-target on/off (CNN dx steers the strobe target; DX/DY gauges on HDMI)\r\n");
@@ -458,12 +494,41 @@ static int mnist_crop_key(int ch)
     case ',': g_exposure = (g_exposure > 256) ? g_exposure - 256 : 32;       /* exposure down */
               if (g_ov9281_present) ov9281_set_exposure(g_ov9281_iic, g_exposure);
               xil_printf("expo=%lu lines\r\n", (unsigned long)g_exposure); return 1;
+    case 'q': g_trig_vts_i = (g_trig_vts_i + 1u) % TRIG_VTS_N;   /* trigger-mode frame length */
+              if (g_ov9281_present && g_trig_active) ov9281_set_vts(g_ov9281_iic, trig_vts());
+              fsin_tag_apply();
+              xil_printf("trigger VTS=%lu lines (~%lu us/frame), PL drop window %lu us%s\r\n",
+                         (unsigned long)trig_vts(), (unsigned long)(trig_vts() * 182u / 10u),
+                         (unsigned long)fsin_drop_window_us(),
+                         g_trig_active ? "" : " (applies when F is on)"); return 1;
+    case 'Q': g_pl_drop = !g_pl_drop; fsin_tag_apply();             /* PL wake-frame drop */
+              xil_printf("PL wake-frame drop: %s\r\n", g_pl_drop ? "ON" : "off (SW dim gate only)");
+              return 1;
     case 'B': { /* TEST probe: frame-dones (ISR) vs strobe revs -> extra-frame ratio; bright range */
                 uint32_t seq = g_cam_frmbuf ? g_cam_frmbuf->FrameSeq : 0;
-                xil_printf("probe: frame-dones=%lu revs=%lu dropped=%lu bright[min=%lu max=%lu]\r\n",
+                xil_printf("probe: frame-dones=%lu revs=%lu bright[min=%lu max=%lu]\r\n",
                            (unsigned long)seq, (unsigned long)disc_strobe_revs(),
-                           (unsigned long)FSIN_TAG_DROPPED(),
                            (unsigned long)g_frm_min, (unsigned long)g_frm_max);
+#ifdef FSIN_TAG_PRESENT
+                { u32 lf = FSIN_TAG_RD(FTAG_LAST_FRAME);
+                  xil_printf("fsin_tag: fsin=%lu dropped=%lu window=%lu us drop=%s | last SOF %lu us after FSIN, idx %lu%s\r\n",
+                             (unsigned long)FSIN_TAG_RD(FTAG_FSIN_COUNT), (unsigned long)FSIN_TAG_RD(FTAG_DROPPED),
+                             (unsigned long)(FSIN_TAG_RD(FTAG_WINDOW) / 300u),
+                             (FSIN_TAG_RD(FTAG_CTRL) & 1u) ? "on" : "off",
+                             (unsigned long)(FSIN_TAG_RD(FTAG_SOF_DELAY) / 300u),
+                             (unsigned long)(lf & 0xFFu), (lf & 0x100u) ? " (early)" : "");
+                  FSIN_TAG_WR(FTAG_CTRL, FSIN_TAG_RD(FTAG_CTRL) | 2u); }  /* clear counters */
+#endif
+#ifdef STATS_ENABLE
+                { uint32_t pt[MNIST_OVL_PROF_N]; uint32_t n = mnist_ovl_prof(pt);
+                  uint32_t tpu = RT_FREQ_HZ / 1000000u, sum = 0;
+                  for (int i = 0; i < MNIST_OVL_PROF_N; i++) sum += pt[i];
+                  if (n == 0) n = 1;
+                  xil_printf("overlay (%s, n=%lu) avg us: preview=%lu bars=%lu live_flush=%lu pos=%lu pos_flush=%lu total=%lu\r\n",
+                             mnist_ovl_get_delta() ? "delta" : "full", (unsigned long)n,
+                             (unsigned long)(pt[0]/tpu/n), (unsigned long)(pt[1]/tpu/n), (unsigned long)(pt[2]/tpu/n),
+                             (unsigned long)(pt[3]/tpu/n), (unsigned long)(pt[4]/tpu/n), (unsigned long)(sum/tpu/n)); }
+#endif
                 g_frm_min = 255; g_frm_max = 0; } return 1;
     default:  return 0;
     }
@@ -635,8 +700,8 @@ static inline void rt_arm(void)
  * register reads until a window actually elapses. */
 static void stats_service(void)
 {
-	/* target gauge under the ROI preview: always shown, redrawn when target, its max
-	 * (cpr/N) or the auto flag changes. */
+	/* target gauge under the ROI preview: always shown (its value text only with the HUD),
+	 * redrawn when target, its max (cpr/N), the auto flag or the HUD changes. */
 	{ static uint32_t last_t = 0xFFFFFFFFu, last_tm = 0xFFFFFFFFu; static int last_a = -1;
 #ifdef MBDPU_HAS_POS
 	  int a = g_auto_tgt;
@@ -644,8 +709,8 @@ static void stats_service(void)
 	  int a = 0;
 #endif
 	  uint32_t t = disc_strobe_target(), tm = disc_strobe_target_max();
-	  if (t != last_t || tm != last_tm || a != last_a) {
-		last_t = t; last_tm = tm; last_a = a;
+	  if (g_tgt_redraw || t != last_t || tm != last_tm || a != last_a) {
+		g_tgt_redraw = 0; last_t = t; last_tm = tm; last_a = a;
 		mnist_target_gauge(BG_IMG_BUF,   (u32)(VMODE_WIDTH*3u), TGT_GAUGE_X, TGT_GAUGE_Y, TGT_GAUGE_W, t, tm, a);
 		mnist_target_gauge(BG_IMG_BUF_B, (u32)(VMODE_WIDTH*3u), TGT_GAUGE_X, TGT_GAUGE_Y, TGT_GAUGE_W, t, tm, a);
 	  } }
@@ -1655,10 +1720,18 @@ int main() {
 		size_t bgsz = (size_t)VMODE_WIDTH * VMODE_HEIGHT * 3u;
 		Xil_DCacheInvalidateRange(BG_IMG_ORIG, bgsz);                      /* JTAG-loaded, not cached */
 		memcpy((void *)(uintptr_t)BG_IMG_BUF, (const void *)(uintptr_t)BG_IMG_ORIG, bgsz);
+#ifdef MBDPU03_CORE
+		mnist_set_bg_labels(1);       /* demo03 background has DX/DY, 0-9 and "Target Offset" */
+#else
 		mnist_draw_static(BG_IMG_BUF, (u32)(VMODE_WIDTH*3u));             /* fixed 0-9 labels (once) */
+#endif
 		memcpy((void *)(uintptr_t)BG_IMG_BUF_B, (const void *)(uintptr_t)BG_IMG_BUF, bgsz);
 		Xil_DCacheFlushRange(BG_IMG_BUF,   bgsz);
 		Xil_DCacheFlushRange(BG_IMG_BUF_B, bgsz);
+#ifdef STATS_ENABLE
+		mnist_set_tick(rt_tick);
+		mnist_set_show_values(g_hud_on);
+#endif
 	}
 	{
 		u32 bgStride = 0;
@@ -2000,6 +2073,7 @@ int main() {
 			                         MBDPU01_IMG, MBDPU01_OUT, (uint64_t)cambuf,
 			                         ActiveCams[0].VideoPipePtr->Frmbuf.FrameStrideBytes,
 			                         g_crop_x0, g_crop_y0, g_crop_shift, logits, g_pos_x100);
+			FRESULT(pred, g_pos_x100[0], g_pos_x100[1]);   /* fcapz timeline: digit, dx, dy */
 			FMARK_A(fma);
 #elif defined(MBDPU_HAS_POS)
 			int pred = mbdpu02_infer(MBDPU01_BASE, MBDPU01_WBLOB, MBDPU01_PBLOB,

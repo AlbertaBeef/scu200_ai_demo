@@ -1,7 +1,7 @@
 {
   "format": "fpgacapzero.probes.v1",
   "core": "ela",
-  "sample_width": 32,
+  "sample_width": 64,
   "sample_clock_hz": 100000000,
   "probes": [
     {
@@ -123,6 +123,21 @@
       "name": "frame_early",
       "width": 1,
       "lsb": 30
+    },
+    {
+      "name": "digit",
+      "width": 4,
+      "lsb": 32
+    },
+    {
+      "name": "dx",
+      "width": 8,
+      "lsb": 36
+    },
+    {
+      "name": "dy",
+      "width": 8,
+      "lsb": 44
     }
   ]
 }

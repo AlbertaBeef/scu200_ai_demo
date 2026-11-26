@@ -32,7 +32,11 @@ LANES = [
     ("display slot",        "step", "disp_slot"),
     ("collision: wr = dpu read", "bit", "col_dpu"),
     ("collision: wr = display",  "bit", "col_disp"),
+    ("result: digit",       "val",  "digit"),
+    ("result: dx (px)",     "val",  "dx"),
+    ("result: dy (px)",     "val",  "dy"),
 ]
+SIGNED_HALF_PX = ("dx", "dy")      # signed 8-bit, 0.5 px units -> px
 
 
 def load(path):
@@ -57,6 +61,11 @@ def load(path):
     rows = []
     for v, t in zip(vals, out):
         r = {n: (v >> lsb) & ((1 << w) - 1) for n, (lsb, w) in probes.items()}
+        for n in SIGNED_HALF_PX:
+            if n in r:
+                w = probes[n][1]
+                x = r[n] - (1 << w) if r[n] >> (w - 1) else r[n]
+                r[n] = x / 2
         r["t_us"] = (t - t0) * 1e6 / clk
         rows.append(r)
     return d, rows
@@ -180,10 +189,10 @@ function draw(){
     s+=`<text x="4" y="${y+14}">${ln.title}</text><line x1="${LW}" x2="${W}" y1="${y+RH}" y2="${y+RH}" stroke="${css('--grid')}"/>`;
     for(const [t0,t1,v] of ln.segs){ if(t1<a||t0>b) continue;
       const X0=Math.max(x(t0),LW), X1=Math.min(x(t1),W), w=Math.max(X1-X0,1.2);
-      let c=ln.kind==='bit'?(ln.field.startsWith('col')?css('--col'):css('--bit')):css('--s'+v);
+      let c=ln.kind==='bit'?(ln.field.startsWith('col')?css('--col'):css('--bit')):ln.kind==='val'?css('--bit'):css('--s'+v);
       if(ln.kind==='step'&&v===3) c=css('--s3');
-      s+=`<rect x="${X0}" y="${y+4}" width="${w}" height="${RH-8}" rx="2" fill="${c}"><title>${ln.title}: ${(t0/1000).toFixed(3)}–${(t1/1000).toFixed(3)} ms (${(t1-t0).toFixed(1)} µs)${ln.kind!=='bit'?' slot '+v:''}</title></rect>`;
-      if(ln.kind!=='bit'&&w>14) s+=`<text x="${X0+3}" y="${y+15}" style="fill:#fff">${v===3?'–':v}</text>`;}
+      s+=`<rect x="${X0}" y="${y+4}" width="${w}" height="${RH-8}" rx="2" fill="${c}"><title>${ln.title}: ${(t0/1000).toFixed(3)}–${(t1/1000).toFixed(3)} ms (${(t1-t0).toFixed(1)} µs)${ln.kind==='val'?' = '+v:ln.kind!=='bit'?' slot '+v:''}</title></rect>`;
+      if(ln.kind!=='bit'&&w>(ln.kind==='val'?30:14)) s+=`<text x="${X0+3}" y="${y+15}" style="fill:#fff">${ln.kind==='val'?v:(v===3?'–':v)}</text>`;}
   });
   svg.innerHTML=s;
 }

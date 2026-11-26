@@ -4,7 +4,8 @@
 // display frame-buffer reader and mbdpu03's m_axi read channel, reduces each to a
 // "busy" level plus the frame slot (0..2, 3 = not a camera slot) it is touching,
 // adds the FSIN strobe, the two frame-buffer interrupts and 16 firmware marker bits,
-// and feeds a 32-bit event word to an fpgacapZero ELA (4K deep, 32-bit timestamps).
+// plus the latest inference result (digit, dx, dy) from the firmware, and feeds a 64-bit
+// event word to an fpgacapZero ELA (4K deep, 32-bit timestamps).
 //
 // Only samples where something changed are stored: bit 0 (evt) is 1 for exactly the
 // sample in which any other bit changed, and the ELA's storage qualifier is set to
@@ -30,6 +31,10 @@
 //   [30]    frame_early fsin_frame_tag last_frame_early: 1 = last SOF came < DROP_WINDOW
 //                      after FSIN (wake frame, dropped when drop_en = 1)
 //   [31]    0
+//   [35:32] digit      argmax of the last inference (fcapz_result GPIO [3:0])
+//   [43:36] dx         signed, 0.5 px units (112-px input), fcapz_result [11:4]
+//   [51:44] dy         signed, 0.5 px units,                fcapz_result [19:12]
+//   [63:52] 0
 //
 // Clocks: clk = 100 MHz (sample clock, mbdpu03, disc_strobe, GPIO); vclk = 300 MHz
 // (frame buffers). Both come from the same clk_wiz, so the 300->100 crossings are
@@ -119,7 +124,8 @@ module fcapz_evtcap #(
     input  wire        rd_irq,    // vclk domain
     input  wire        frame_early, // vclk domain (fsin_frame_tag last_frame_early)
     input  wire [7:0]  mark_a,    // clk domain
-    input  wire [7:0]  mark_b     // clk domain
+    input  wire [7:0]  mark_b,    // clk domain
+    input  wire [31:0] result     // clk domain: [3:0] digit, [11:4] dx, [19:12] dy
 );
 
     // ------------------------------------------------------------------ slot decode
@@ -209,31 +215,33 @@ module fcapz_evtcap #(
 
     // ------------------------------------------------------------------ event word
     reg  [7:0] ma_q, mb_q;
+    reg  [19:0] res_q = 20'd0;
     reg        fsin_q;
     always @(posedge clk) begin
         ma_q   <= mark_a;
         mb_q   <= mark_b;
+        res_q  <= result[19:0];
         fsin_q <= fsin;
     end
     wire dpu_busy = dpu_cnt[DPU_HOLD_W];
     wire col_dpu  = dpu_busy & wr_busy & (wr_slot == dpu_slot);
     wire col_disp = wr_busy & (wr_slot == disp_slot);
 
-    wire [31:1] cur = {1'b0, early_s, mb_q[7:6], ma_q[7:6], col_disp, col_dpu,
+    wire [63:1] cur = {12'd0, res_q, 1'b0, early_s, mb_q[7:6], ma_q[7:6], col_disp, col_dpu,
                        mb_q[5:0], ma_q[5:0], disp_slot, rd_irq_s, dpu_slot, dpu_busy,
                        wr_irq_s, wr_slot, wr_busy, fsin_q};
-    reg  [31:1] cur_q = 0;
+    reg  [63:1] cur_q = 0;
     reg         evt   = 1'b0;
     always @(posedge clk) begin
         cur_q <= cur;
         evt   <= (cur != cur_q);   // flags the sample in which cur_q takes the new value
     end
     // evt(t) = cur(t-1) != cur(t-2) = cur_q(t) != cur_q(t-1): aligned with cur_q.
-    wire [31:0] probe = {cur_q, evt};
+    wire [63:0] probe = {cur_q, evt};
 
     // ------------------------------------------------------------------ ELA
     fcapz_ela_xilinxus #(
-        .SAMPLE_W     (32),
+        .SAMPLE_W     (64),
         .DEPTH        (DEPTH),
         .TRIG_STAGES  (1),
         .STOR_QUAL    (1),

@@ -72,6 +72,30 @@ static const uint8_t FONT5x7[10][7] = {
 static int s_dim = MNIST_DIM;
 void mnist_set_input_dim(int dim) { s_dim = (dim == ROI_PX) ? ROI_PX : MNIST_DIM; }
 
+/* Overlay profiling: per-stage tick sums (timer supplied by the app), read+reset by
+ * mnist_ovl_prof(). Stages: 0 preview, 1 bars, 2 live flush, 3 pos draw, 4 pos flush. */
+static uint32_t (*s_tick)(void) = 0;
+static int s_bg_labels = 0;     /* 1: DX/DY/0-9/"Target Offset" labels are in the background image */
+void mnist_set_bg_labels(int on) { s_bg_labels = on ? 1 : 0; }
+static int s_show_vals = 0;     /* numeric DX/DY + TGT values drawn (HUD 'h'); gauges always */
+static uint32_t s_prof[MNIST_OVL_PROF_N];
+static uint32_t s_prof_n;
+static uint32_t s_prof_t;
+static inline void prof_start(void) { s_prof_t = s_tick ? s_tick() : 0; }
+static inline void prof_mark(int stage)
+{
+    uint32_t t = s_tick ? s_tick() : 0;
+    s_prof[stage] += t - s_prof_t; s_prof_t = t;
+}
+void mnist_set_tick(uint32_t (*fn)(void)) { s_tick = fn; }
+uint32_t mnist_ovl_prof(uint32_t out[MNIST_OVL_PROF_N])
+{
+    uint32_t n = s_prof_n;
+    for (int i = 0; i < MNIST_OVL_PROF_N; i++) { out[i] = s_prof[i]; s_prof[i] = 0; }
+    s_prof_n = 0;
+    return n;
+}
+
 // Draw the static 0-9 digit labels once (they never change; only the bars update live).
 void mnist_draw_static(uintptr_t fb, uint32_t stride)
 {
@@ -93,8 +117,9 @@ void mnist_draw_static(uintptr_t fb, uint32_t stride)
 
 // Live: the ROI preview + one confidence bar per digit (min-max normalized logits,
 // winner highlighted). Bars clear-then-fill so they shrink/grow correctly each frame.
-void mnist_draw_live(uintptr_t fb, uint32_t stride, const int8_t *img28, const int32_t *logits)
+static void draw_live_full(uintptr_t fb, uint32_t stride, const int8_t *img28, const int32_t *logits)
 {
+    prof_start();
     // ROI preview (row-pointer sequential writes); s_dim x s_dim input scaled to 112x112
     const int sc = ROI_PX / s_dim;
     for (int r = 0; r < s_dim; r++) {
@@ -108,6 +133,7 @@ void mnist_draw_live(uintptr_t fb, uint32_t stride, const int8_t *img28, const i
             }
         }
     }
+    prof_mark(0);
     // normalize logits to bar lengths; find the winner
     int32_t mn = logits[0], mx = logits[0], arg = 0;
     for (int i = 1; i < 10; i++) {
@@ -127,11 +153,13 @@ void mnist_draw_live(uintptr_t fb, uint32_t stride, const int8_t *img28, const i
                 else         { *p++ = 0;  *p++ = 0;  *p++ = 0;  }
         }
     }
+    prof_mark(1);
     int top  = (ROI_Y < BAR_Y0) ? ROI_Y : BAR_Y0;
     int roib = ROI_Y + MNIST_DIM*ROI_S;
     int barb = BAR_Y0 + 9*BAR_DY + 2 + BAR_H + 2;
     int bot  = (roib > barb) ? roib : barb;
     Xil_DCacheFlushRange(fb + (uintptr_t)top*stride, (uintptr_t)(bot - top)*stride);
+    prof_mark(2);
 }
 
 /* ---- Small on-screen HUD (RPM / captures-per-second), drawn into the background ------ */
@@ -269,19 +297,25 @@ void mnist_stats_panel(uintptr_t fb, uint32_t stride, int x0, int y0, const mnis
     Xil_DCacheFlushRange(fb + (uintptr_t)y0*stride, (uintptr_t)H*stride);
 }
 
-#define GAUGE_H   38            /* gauge box height: label row (scale 2) + track/marker */
-
-/* Shared gauge: label left, value text right-aligned, then a track spanning [mn, mx] with a
- * teal fill from the reference point to the value and a teal marker at the value. With
- * show_ref the reference is `ref` and gets a white tick (deviation-from-default view);
- * without it the fill runs from mn (plain level view). */
+/* Shared gauge. The label row (y0 .. y0+16) is drawn here only when the background does not
+ * carry the label (demo03's background has a static "Target Offset"; then that row is never
+ * touched). The band the track, ref tick and marker occupy (rows y0+17 .. y0+33) is cleared. A track spanning [mn, mx] with a teal fill from the
+ * reference point to the value and a teal marker at the value. With show_ref the reference is
+ * `ref` and gets a white tick (deviation-from-default view); without it the fill runs from mn.
+ * valtxt (HUD only) is drawn right of the track; its box is always cleared so it disappears
+ * when the HUD goes off. */
+#define GAUGE_TRK_DY  22        /* track top below y0 */
+#define GAUGE_BAND_Y0 (GAUGE_TRK_DY - 5)    /* ref tick / marker top */
+#define GAUGE_BAND_H  17                    /* down to the marker bottom (+TRK_H/2 + MK_H/2) */
+#define GAUGE_VAL_GAP 12        /* value text left edge = right end of track + gap */
+#define GAUGE_VAL_W   96        /* cleared value box ("9999/9999" fits at scale 2 -> 8 chars) */
 static void gauge_draw(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
                        const char *label, const char *valtxt,
                        uint32_t val, uint32_t mn, uint32_t mx, uint32_t ref, int show_ref)
 {
     const uint32_t BLACK = 0x000000u, WHITE = 0xF0F4F8u, TEAL = 0x22E6E6u, TRACK = 0x303840u;
     enum { S = 2, TRK_H = 6, MK_W = 4, MK_H = 16 };
-    const int TRK_Y = y0 + 22;
+    const int TRK_Y = y0 + GAUGE_TRK_DY, BY = y0 + GAUGE_BAND_Y0;
 
     if (val < mn) val = mn;
     if (val > mx) val = mx;
@@ -290,10 +324,14 @@ static void gauge_draw(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
     int xv = (int)(((uint64_t)(val - mn) * (uint32_t)(w - 1) + span/2) / span);
     int xr = (int)(((uint64_t)(ref - mn) * (uint32_t)(w - 1) + span/2) / span);
 
-    osd_fill(fb, stride, x0 - 4, y0, w + 8, GAUGE_H, BLACK);   /* clear box */
-
-    osd_text(fb, stride, x0, y0, S, label, WHITE, BLACK);
-    osd_text(fb, stride, x0 + w - osd_textw(valtxt, S), y0, S, valtxt, TEAL, BLACK);
+    if (!s_bg_labels) {                                     /* firmware-drawn label row */
+        osd_fill(fb, stride, x0 - 4, y0, w + 8, GAUGE_BAND_Y0, BLACK);
+        osd_text(fb, stride, x0, y0, S, label, WHITE, BLACK);
+        Xil_DCacheFlushRange(fb + (uintptr_t)y0*stride, (uintptr_t)GAUGE_BAND_Y0*stride);
+    }
+    osd_fill(fb, stride, x0 - 4, BY, w + 8, GAUGE_BAND_H, BLACK);                 /* track band */
+    osd_fill(fb, stride, x0 + w + GAUGE_VAL_GAP, BY, GAUGE_VAL_W, GAUGE_BAND_H, BLACK); /* value box */
+    if (valtxt) osd_text(fb, stride, x0 + w + GAUGE_VAL_GAP, TRK_Y + TRK_H/2 - 7, S, valtxt, TEAL, BLACK);
 
     osd_fill(fb, stride, x0, TRK_Y, w, TRK_H, TRACK);
     int a = xv < xr ? xv : xr, b = xv < xr ? xr : xv;
@@ -304,8 +342,9 @@ static void gauge_draw(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
     if (mk > x0 + w + 3 - MK_W) mk = x0 + w + 3 - MK_W;
     osd_fill(fb, stride, mk, TRK_Y + TRK_H/2 - MK_H/2, MK_W, MK_H, TEAL);
 
-    Xil_DCacheFlushRange(fb + (uintptr_t)y0*stride, (uintptr_t)GAUGE_H*stride);
+    Xil_DCacheFlushRange(fb + (uintptr_t)BY*stride, (uintptr_t)GAUGE_BAND_H*stride);
 }
+
 
 void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
                         uint32_t target, uint32_t target_max, int auto_on)
@@ -314,7 +353,7 @@ void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
     int n = osd_u2s(v, (int)target);                  /* "value/max" — max moves with N and cpr */
     v[n++] = '/';
     osd_u2s(v + n, (int)target_max);
-    gauge_draw(fb, stride, x0, y0, w, auto_on ? "AUTO" : "TGT", v, target, 0u, target_max,
+    gauge_draw(fb, stride, x0, y0, w, auto_on ? "AUTO" : "TGT", s_show_vals ? v : 0, target, 0u, target_max,
                target_max / 2u, 1);
 }
 
@@ -323,9 +362,10 @@ void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
  * equals the preview's own extent: each marker sits exactly where the digit centre is drawn.
  *   DX: horizontal, under the preview      (x ROI_X..+112, y POS_DX_Y)       left -, right +
  *   DY: vertical, left of the preview      (x POS_DY_X, y ROI_Y..+112)       top +, bottom -
- * Values (scale 2), label over value: "DX"/"+1.2" under the DX gauge, centred on its zero
- * tick; "DY"/"-0.4" left of the DY gauge, value right-aligned to it, label over its first digit. Whole box repainted and
- * cache-flushed every call (drawn into the back buffer each capture, like the bars). */
+ * Labels "DX"/"DY" over the values: drawn here unless they are in the background image
+ * (mnist_set_bg_labels). Values (scale 2, HUD only): under the DX gauge centred on its zero tick,
+ * left of the DY gauge on a fixed column centre. Only the gauge bands and value boxes are
+ * cleared, so background content around them is preserved. */
 #define POS_SPAN   (MNIST_DIM*ROI_S)        /* 112 screen px = 28 model px */
 #define POS_PPX    (POS_SPAN / s_dim)       /* screen px per model px: 4 (28 in) or 1 (112 in) */
 #define POS_DX_Y   (ROI_Y + POS_SPAN + 8)   /* DX track top (8 px under the preview) */
@@ -336,8 +376,6 @@ void mnist_target_gauge(uintptr_t fb, uint32_t stride, int x0, int y0, int w,
 #define POS_TXT_Y  (POS_DX_Y + 18)          /* first value line */
 #define POS_DYT_R  (POS_DY_X - 10)        /* DY text right edge (left of the DY track) */
 #define POS_DYT_W  64                       /* DY text column width ("-14.0" at scale 2) */
-#define POS_BOX_X0 (POS_DYT_R - POS_DYT_W)
-#define POS_BOX_Y1 (POS_TXT_Y + 2*18)       /* two text lines of 14 px + gap */
 
 static void pos_fmt(char *buf, int v_x100)   /* "+1.2" / "-0.4", rounded to 0.1 */
 {
@@ -347,8 +385,26 @@ static void pos_fmt(char *buf, int v_x100)   /* "+1.2" / "-0.4", rounded to 0.1 
     osd_fx10(buf + 1, x10);
 }
 
-void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100)
+/* DX gauge band: x [ROI_X-4, ROI_X+POS_SPAN+4), y [ty-6, ty+POS_TRK+6) holds the track,
+ * fill, zero tick and marker. DY band: x [tx-6, tx+POS_TRK+6), y [ROI_Y-4, ROI_Y+POS_SPAN+4).
+ * Both lie inside the area the full path clears, and do not overlap each other or the text. */
+#define DXB_X0 (ROI_X - 4)
+#define DXB_W  (POS_SPAN + 8)
+#define DXB_Y0 (POS_DX_Y - 6)
+#define DXB_H  (POS_TRK + 12)
+#define DYB_X0 (POS_DY_X - 6)
+#define DYB_W  (POS_TRK + 12)
+#define DYB_Y0 (ROI_Y - 4)
+#define DYB_H  (POS_SPAN + 8)
+#define POS_DXV_Y  (POS_TXT_Y + 18)          /* DX value row, under the background's "DX" label */
+#define POS_DYV_C  (POS_DYT_R - POS_DYT_W/2)  /* DY value column centre */
+#define POS_DYV_Y  (ROI_Y + POS_SPAN/2 + 12)  /* DY value row, under the background's "DY" label (y 726-743) */
+#define POS_VAL_W  72                         /* cleared value box width (6 chars at scale 2) */
+#define POS_VAL_H  14
+
+static void draw_pos_full(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100)
 {
+    prof_start();
     const uint32_t BLACK = 0x000000u, WHITE = 0xF0F4F8u, TEAL = 0x22E6E6u, TRACK = 0x303840u;
     const int half = POS_SPAN / 2, lim = half * 100 / POS_PPX;     /* +-14.00 / +-56.00 px */
     int dx = dx_x100 > lim ? lim : (dx_x100 < -lim ? -lim : dx_x100);
@@ -356,10 +412,12 @@ void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100)
     int ox = (dx * POS_PPX) / 100, oy = (dy * POS_PPX) / 100;      /* screen px from centre */
     char v[12];
 
-    /* clear: the strip under the preview (DX + text) and the column left of it (DY) */
-    osd_fill(fb, stride, POS_BOX_X0, POS_DX_Y - 6, ROI_X + POS_SPAN + 4 - POS_BOX_X0,
-             POS_BOX_Y1 - (POS_DX_Y - 6), BLACK);
-    osd_fill(fb, stride, POS_BOX_X0, ROI_Y - 4, ROI_X - 2 - POS_BOX_X0, POS_SPAN + 8, BLACK);
+    /* clear only the two gauge bands and the two value boxes, never the label areas (on demo03
+     * the "DX"/"DY" labels are in the background image) */
+    osd_fill(fb, stride, DXB_X0, DXB_Y0, DXB_W, DXB_H, BLACK);
+    osd_fill(fb, stride, DYB_X0, DYB_Y0, DYB_W, DYB_H, BLACK);
+    osd_fill(fb, stride, ROI_X + half - POS_VAL_W/2, POS_DXV_Y, POS_VAL_W, POS_VAL_H, BLACK);
+    osd_fill(fb, stride, POS_DYV_C - POS_VAL_W/2, POS_DYV_Y, POS_VAL_W, POS_VAL_H, BLACK);
 
     /* DX: track, fill centre->value, centre tick, marker */
     const int cx = ROI_X + half, ty = POS_DX_Y;
@@ -375,14 +433,18 @@ void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100)
     osd_fill(fb, stride, tx - 4, cy - 1, POS_TRK + 8, 2, WHITE);
     osd_fill(fb, stride, tx + POS_TRK/2 - POS_MK_L/2, cy - oy - POS_MK_W/2, POS_MK_L, POS_MK_W, TEAL);
 
-    /* values */
-    osd_text(fb, stride, cx - osd_textw("DX", 2)/2, POS_TXT_Y, 2, "DX", WHITE, BLACK);
-    pos_fmt(v, dx_x100); osd_text(fb, stride, cx - osd_textw(v, 2)/2, POS_TXT_Y + 18, 2, v, TEAL, BLACK);
-    pos_fmt(v, dy_x100);                       /* label starts over the value's first digit */
-    osd_text(fb, stride, POS_DYT_R - osd_textw(v, 2) + osd_textw(" ", 2), cy - 18, 2, "DY", WHITE, BLACK);
-    osd_text(fb, stride, POS_DYT_R - osd_textw(v, 2), cy + 4, 2, v, TEAL, BLACK);
+    /* labels: firmware-drawn only when the background does not carry them */
+    if (!s_bg_labels) {
+        osd_text(fb, stride, cx - osd_textw("DX", 2)/2, POS_TXT_Y, 2, "DX", WHITE, BLACK);
+        osd_text(fb, stride, POS_DYV_C - osd_textw("DY", 2)/2, cy - 18, 2, "DY", WHITE, BLACK);
+    }
+    /* values (HUD only), centred on fixed columns so they never shift the layout */
+    if (s_show_vals) { pos_fmt(v, dx_x100); osd_text(fb, stride, cx - osd_textw(v, 2)/2, POS_DXV_Y, 2, v, TEAL, BLACK); }
+    if (s_show_vals) { pos_fmt(v, dy_x100); osd_text(fb, stride, POS_DYV_C - osd_textw(v, 2)/2, POS_DYV_Y, 2, v, TEAL, BLACK); }
+    prof_mark(3);
 
-    Xil_DCacheFlushRange(fb + (uintptr_t)(ROI_Y - 4)*stride, (uintptr_t)(POS_BOX_Y1 - (ROI_Y - 4))*stride);
+    Xil_DCacheFlushRange(fb + (uintptr_t)DYB_Y0*stride, (uintptr_t)(POS_DXV_Y + POS_VAL_H - DYB_Y0)*stride);  /* covers labels */
+    prof_mark(4);
 }
 
 // Capture the crop region resampled to 112x112 grayscale (nearest-neighbour) for training data.
@@ -428,3 +490,171 @@ void mnist_draw_roi_box(uintptr_t fb, uint32_t stride, int x, int y, int side,
     Xil_DCacheFlushRange(fb + (uintptr_t)y*stride, (uintptr_t)h*stride);  /* box rows -> DMA */
 }
 #endif
+
+/* ---- Delta overlay -----------------------------------------------------------------------
+ * The full path above repaints the whole panel and flushes full-width screen rows (~250 KB
+ * drawn, ~2.6 MB of flush range) for every capture. With the MicroBlaze's 16-byte write-back
+ * D-cache every touched line is a DDR read + write-back, so the cost is set by bytes touched.
+ * The delta path keeps, per overlay buffer (front/back are drawn alternately), what was last
+ * drawn there and only repaints what changed:
+ *   preview  : always (it is new pixels every capture), flushed per row (112*3 B, not stride)
+ *   bars     : all 10, full width, every capture; flushed as one narrow rectangle
+ *   DX / DY  : the two gauge bands (track + fill + tick + marker), small fixed rectangles
+ *   values   : only when the printed string changes
+ * The first draw into a buffer (or after mnist_ovl_invalidate) uses the full path. */
+typedef struct {
+    uintptr_t fb;
+    int       live_ok, pos_ok;
+    int16_t   bar_len[10];
+    int8_t    arg;
+    char      dxs[12], dys[12];
+} ovl_state_t;
+static ovl_state_t s_ovl[2];
+static int s_ovl_delta = 0;
+
+void mnist_ovl_invalidate(void) { for (int i = 0; i < 2; i++) s_ovl[i].live_ok = s_ovl[i].pos_ok = 0; }
+void mnist_ovl_set_delta(int on) { s_ovl_delta = on ? 1 : 0; mnist_ovl_invalidate(); }
+/* Show/hide the numeric values (gauges and labels stay). Forces a full repaint of the DX/DY
+ * area in both buffers; the caller repaints the target gauge (mnist_target_gauge). */
+void mnist_set_show_values(int on) { s_show_vals = on ? 1 : 0; mnist_ovl_invalidate(); }
+int  mnist_ovl_get_delta(void)   { return s_ovl_delta; }
+
+static ovl_state_t *ovl_slot(uintptr_t fb)
+{
+    for (int i = 0; i < 2; i++) if (s_ovl[i].fb == fb) return &s_ovl[i];
+    for (int i = 0; i < 2; i++) if (s_ovl[i].fb == 0) { s_ovl[i].fb = fb; s_ovl[i].live_ok = s_ovl[i].pos_ok = 0; return &s_ovl[i]; }
+    s_ovl[0].fb = fb; s_ovl[0].live_ok = s_ovl[0].pos_ok = 0;     /* >2 buffers: recycle */
+    return &s_ovl[0];
+}
+
+static void flush_rect(uintptr_t fb, uint32_t stride, int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0) return;
+    for (int r = 0; r < h; r++) {   /* braces: Xil_DCacheFlushRange is a two-statement macro */
+        Xil_DCacheFlushRange(fb + (uintptr_t)(y + r)*stride + (uintptr_t)x*3u, (uintptr_t)w*3u);
+    }
+}
+
+static void bar_logits(const int32_t *logits, int len[10], int *arg_out)
+{
+    int32_t mn = logits[0], mx = logits[0], arg = 0;
+    for (int i = 1; i < 10; i++) {
+        if (logits[i] < mn) mn = logits[i];
+        if (logits[i] > mx) { mx = logits[i]; arg = i; }
+    }
+    int32_t rng = mx - mn; if (rng <= 0) rng = 1;
+    for (int i = 0; i < 10; i++) {
+        int l = (int)(((int64_t)(logits[i] - mn) * BAR_MAX_W) / rng);
+        len[i] = l < 0 ? 0 : (l > BAR_MAX_W ? BAR_MAX_W : l);
+    }
+    *arg_out = (int)arg;
+}
+
+void mnist_draw_live(uintptr_t fb, uint32_t stride, const int8_t *img28, const int32_t *logits)
+{
+    ovl_state_t *st = ovl_slot(fb);
+    int len[10], arg;
+    bar_logits(logits, len, &arg);
+    if (!s_ovl_delta || !st->live_ok) {
+        draw_live_full(fb, stride, img28, logits);
+        for (int i = 0; i < 10; i++) st->bar_len[i] = (int16_t)len[i];
+        st->arg = (int8_t)arg; st->live_ok = 1;
+        s_prof_n++;
+        return;
+    }
+    prof_start();
+    /* preview: same pixels as the full path, flushed per row */
+    const int sc = ROI_PX / s_dim;
+    for (int r = 0; r < s_dim; r++) {
+        const int8_t *src = &img28[r * s_dim];
+        for (int dy = 0; dy < sc; dy++) {
+            uint8_t *p = (uint8_t *)(fb + (uintptr_t)(ROI_Y + r*sc + dy)*stride + (uintptr_t)ROI_X*3u);
+            for (int c = 0; c < s_dim; c++) {
+                int q = src[c];
+                uint8_t g = (uint8_t)(q < 0 ? 0 : (q > 127 ? 255 : q * 2));
+                for (int dx = 0; dx < sc; dx++) { *p++ = g; *p++ = g; *p++ = g; }
+            }
+        }
+    }
+    prof_mark(0);
+    flush_rect(fb, stride, ROI_X, ROI_Y, ROI_PX, ROI_PX);
+    prof_mark(2);
+    /* bars: all 10 repainted over their full width every capture (same as the full path),
+     * flushed as one 260 px wide rectangle instead of full-width screen rows. */
+    for (int i = 0; i < 10; i++) {
+        int L = len[i];
+        uint8_t Gc = (i == arg) ? 235 : 80, Bc = Gc;
+        int by = BAR_Y0 + i*BAR_DY + 2;
+        for (int dy = 0; dy < BAR_H; dy++) {
+            uint8_t *p = (uint8_t *)(fb + (uintptr_t)(by + dy)*stride + (uintptr_t)BAR_X*3u);
+            for (int x = 0; x < BAR_MAX_W; x++)
+                if (x < L) { *p++ = 0; *p++ = Gc; *p++ = Bc; }
+                else       { *p++ = 0; *p++ = 0;  *p++ = 0;  }
+        }
+    }
+    prof_mark(1);
+    flush_rect(fb, stride, BAR_X, BAR_Y0 + 2, BAR_MAX_W, 9*BAR_DY + BAR_H);
+    prof_mark(2);
+    for (int i = 0; i < 10; i++) st->bar_len[i] = (int16_t)len[i];
+    st->arg = (int8_t)arg;
+    s_prof_n++;
+}
+
+
+static void pos_value(uintptr_t fb, uint32_t stride, int xc, int y, const char *v, char *last,
+                      uint32_t fg)
+{
+    int i = 0;
+    while (v[i] && v[i] == last[i]) i++;
+    if (v[i] == 0 && last[i] == 0) return;                   /* unchanged */
+    int w = osd_textw(v, 2), wl = osd_textw(last, 2);
+    int bw = POS_VAL_W; if (w > bw) bw = w; if (wl > bw) bw = wl;
+    osd_fill(fb, stride, xc - bw/2, y, bw, 14, 0x000000u);
+    osd_text(fb, stride, xc - w/2, y, 2, v, fg, 0x000000u);
+    flush_rect(fb, stride, xc - bw/2, y, bw, 14);
+    for (i = 0; v[i] && i < 11; i++) last[i] = v[i];
+    last[i] = 0;
+}
+
+void mnist_draw_pos(uintptr_t fb, uint32_t stride, int dx_x100, int dy_x100)
+{
+    ovl_state_t *st = ovl_slot(fb);
+    if (!s_ovl_delta || !st->pos_ok) {
+        draw_pos_full(fb, stride, dx_x100, dy_x100);
+        if (s_show_vals) { pos_fmt(st->dxs, dx_x100); pos_fmt(st->dys, dy_x100); }
+        else             { st->dxs[0] = 0; st->dys[0] = 0; }
+        st->pos_ok = 1;
+        return;
+    }
+    prof_start();
+    const uint32_t BLACK = 0x000000u, WHITE = 0xF0F4F8u, TEAL = 0x22E6E6u, TRACK = 0x303840u;
+    const int half = POS_SPAN / 2, lim = half * 100 / POS_PPX;
+    int dx = dx_x100 > lim ? lim : (dx_x100 < -lim ? -lim : dx_x100);
+    int dy = dy_x100 > lim ? lim : (dy_x100 < -lim ? -lim : dy_x100);
+    int ox = (dx * POS_PPX) / 100, oy = (dy * POS_PPX) / 100;
+    char v[12];
+
+    const int cx = ROI_X + half, ty = POS_DX_Y;
+    osd_fill(fb, stride, DXB_X0, DXB_Y0, DXB_W, DXB_H, BLACK);
+    osd_fill(fb, stride, ROI_X, ty, POS_SPAN, POS_TRK, TRACK);
+    if (ox) osd_fill(fb, stride, ox < 0 ? cx + ox : cx, ty, ox < 0 ? -ox : ox, POS_TRK, TEAL);
+    osd_fill(fb, stride, cx - 1, ty - 4, 2, POS_TRK + 8, WHITE);
+    osd_fill(fb, stride, cx + ox - POS_MK_W/2, ty + POS_TRK/2 - POS_MK_L/2, POS_MK_W, POS_MK_L, TEAL);
+
+    const int cy = ROI_Y + half, tx = POS_DY_X;
+    osd_fill(fb, stride, DYB_X0, DYB_Y0, DYB_W, DYB_H, BLACK);
+    osd_fill(fb, stride, tx, ROI_Y, POS_TRK, POS_SPAN, TRACK);
+    if (oy) osd_fill(fb, stride, tx, oy > 0 ? cy - oy : cy, POS_TRK, oy > 0 ? oy : -oy, TEAL);
+    osd_fill(fb, stride, tx - 4, cy - 1, POS_TRK + 8, 2, WHITE);
+    osd_fill(fb, stride, tx + POS_TRK/2 - POS_MK_L/2, cy - oy - POS_MK_W/2, POS_MK_L, POS_MK_W, TEAL);
+    prof_mark(3);
+    flush_rect(fb, stride, DXB_X0, DXB_Y0, DXB_W, DXB_H);
+    flush_rect(fb, stride, DYB_X0, DYB_Y0, DYB_W, DYB_H);
+    prof_mark(4);
+
+    if (s_show_vals) {
+        pos_fmt(v, dx_x100); pos_value(fb, stride, cx, POS_DXV_Y, v, st->dxs, TEAL);
+        pos_fmt(v, dy_x100); pos_value(fb, stride, POS_DYV_C, POS_DYV_Y, v, st->dys, TEAL);
+    }
+    prof_mark(3);
+}

@@ -30,7 +30,7 @@ list; this file is the annotated version.
 | `S` | arm / disarm the strobe |
 | `F` | fire an FSIN trigger |
 | `N` | captures per revolution: cycles `1 / 2 / 4 / 8 / 16` |
-| `T` / `G` | target position ± 5 (clamped to `0 … cpr/N`, default mid-point; shown on the HDMI **TGT** gauge under the ROI preview) |
+| `T` / `G` | target position ± 5 (clamped to `0 … cpr/N`, default mid-point; shown on the HDMI **TGT** gauge under the ROI preview; on demo03 the background's static **Target Offset** gauge) |
 | `C` / `V` | **`cpr` ± 0.1** — the drift-null trim (see below) |
 | `Y` | strobe status |
 
@@ -58,7 +58,8 @@ list; this file is the annotated version.
 ## Overlay / display
 | Key | Action |
 |-----|--------|
-| `h` | HUD stats panel + ROI box on/off |
+| `h` | HUD on/off: stats panel, ROI box, and the numeric DX/DY and target values (gauges and labels always shown; default off). On demo03 the DX/DY, 0–9 and "Target Offset" labels are part of the background image; the target value sits right of its gauge track |
+| `u` | Overlay redraw: full (default) / delta (repaint only what changed). `B` prints per-stage overlay timing |
 | `v` | verbose console (1 Hz stats line) on/off |
 | `?` | print this key list |
 
@@ -80,7 +81,7 @@ the digit centre on the preview; the values print below (`DX +1.2`, `DY -0.4`).
 
 | Key | Action |
 |-----|--------|
-| `A` | auto-target on/off — once per revolution, the mean **dx** of that revolution steps the strobe `target` toward centring (1 count per 0.5 px, max 5, deadband 0.5 px; dx > 0 raises target, wrapping around 0..max). Can only be turned on while `S` is armed and `F` is on, and switches itself off if either is turned off. The **TGT** gauge reads **AUTO** while it runs. |
+| `A` | auto-target on/off — once per revolution, the mean **dx** of that revolution steps the strobe `target` toward centring (1 count per 0.5 px, max 5, deadband 0.5 px; dx > 0 raises target, wrapping around 0..max). Can only be turned on while `S` is armed and `F` is on, and switches itself off if either is turned off. The **TGT** gauge reads **AUTO** while it runs (demo01/02; demo03's gauge label is the static "Target Offset", so check `AUTO=` on the verbose line). |
 
 > **Camera watchdog.** With the strobe armed and FSIN on, if the disc turns 3 revolutions without a
 > completed frame, the OV9281 is assumed locked up and is reset and re-configured automatically

@@ -7,9 +7,10 @@
 #  - fcapz_mark   : AXI GPIO, ch1 = main-loop markers, ch2 = ISR markers (8 bits each).
 #                   Two channels so the ISR and the main loop never read-modify-write
 #                   the same register.
+#  - fcapz_result : AXI GPIO, latest inference result (digit, dx, dy) for the timeline.
 #  - fcapz_evtcap : module reference (src/hdl/fcapz_evtcap.v) = AXI monitors on
 #                   frmbuf_wr AW, display frmbuf_rd AR and mbdpu03 AR + fpgacapZero
-#                   ELA (32 bit x 4K, timestamps, storage qualification) on BSCAN USER3.
+#                   ELA (64 bit x 4K, timestamps, storage qualification) on BSCAN USER3.
 
 set fcapz_hdl [file normalize [file join [file dirname [info script]] .. hdl]]
 add_files -norecurse -fileset sources_1 [concat \
@@ -32,6 +33,14 @@ set_property -dict [list \
 connect_bd_net [get_bd_pins clk_wiz/clk_100M]                    [get_bd_pins fcapz_mark/s_axi_aclk]
 connect_bd_net [get_bd_pins rst_clk_wiz_100M/peripheral_aresetn] [get_bd_pins fcapz_mark/s_axi_aresetn]
 lappend periph_ports [list "fcapz_mark/S_AXI" "clk_wiz/clk_100M" "rst_clk_wiz_100M/peripheral_aresetn"]
+
+# --- latest inference result for the timeline: [3:0] digit, [11:4] dx, [19:12] dy
+#     (signed, 0.5 px units), written by the worker after each mbdpu03 inference
+set fcapz_result [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio fcapz_result ]
+set_property -dict [list CONFIG.C_GPIO_WIDTH {32} CONFIG.C_ALL_OUTPUTS {1}] $fcapz_result
+connect_bd_net [get_bd_pins clk_wiz/clk_100M]                    [get_bd_pins fcapz_result/s_axi_aclk]
+connect_bd_net [get_bd_pins rst_clk_wiz_100M/peripheral_aresetn] [get_bd_pins fcapz_result/s_axi_aresetn]
+lappend periph_ports [list "fcapz_result/S_AXI" "clk_wiz/clk_100M" "rst_clk_wiz_100M/peripheral_aresetn"]
 
 # --- capture core
 set fcapz_evtcap [ create_bd_cell -type module -reference fcapz_evtcap fcapz_evtcap ]
@@ -56,3 +65,4 @@ connect_bd_net [get_bd_pins mipi_0/frmbufrd_irq]   [get_bd_pins fcapz_evtcap/rd_
 connect_bd_net [get_bd_pins fcapz_mark/gpio_io_o]  [get_bd_pins fcapz_evtcap/mark_a]
 connect_bd_net [get_bd_pins fcapz_mark/gpio2_io_o] [get_bd_pins fcapz_evtcap/mark_b]
 connect_bd_net [get_bd_pins mipi_0/fsin_frame_early] [get_bd_pins fcapz_evtcap/frame_early]
+connect_bd_net [get_bd_pins fcapz_result/gpio_io_o] [get_bd_pins fcapz_evtcap/result]

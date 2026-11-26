@@ -39,4 +39,12 @@ int ov9281_set_exposure(uint8_t iic_id, uint32_t lines);
  * Registers 0x3508[4:0]/0x3509[7:0]. The main brightness lever in FSIN trigger mode. */
 int ov9281_set_gain(uint8_t iic_id, uint32_t gain_x16);
 
+/* Frame length (VTS, lines) - registers 0x380E/0x380F. The streaming mode uses
+ * OV9281_VTS_DEFAULT (1373 lines x ~18.2 us = 25 ms, 40 fps). In FSIN trigger mode the
+ * good frame starts one VTS after the wake frame, and the sensor ignores a new FSIN until
+ * it has finished both, so a shorter VTS raises the strobe rate the camera can follow.
+ * Must stay >= the 496 read-out lines plus blanking. */
+#define OV9281_VTS_DEFAULT 1373u
+int ov9281_set_vts(uint8_t iic_id, uint32_t vts);
+
 #endif /* OV9281_H_ */

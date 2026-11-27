@@ -1,8 +1,12 @@
 # Console keys (UART cheat-sheet)
 
-The `scu200_ai_demo01` app is driven interactively over the board's serial console.
+The app of every design (`scu200_ai_demo01`, `02`, `03`, `03_fcapz`) is driven interactively over
+the board's serial console. Most keys are common to all designs; the ones that exist on only some
+are marked. After programming, the standard setup is `S`, `F`, `q`×4 (VTS 544) and, on demo02/03,
+`A`.
 
-**Serial:** `115200` baud, `8N1`, no flow control (the design's `axi_uartlite`). Keys are
+**Serial:** `115200` baud, `8N1`, no flow control (the design's `axi_uartlite`; `/dev/ttyUSB1` on
+the dev host). Keys are
 single-press, case-sensitive, and take effect live. Press **`?`** at any time for the on-device
 list; this file is the annotated version.
 
@@ -54,12 +58,15 @@ list; this file is the annotated version.
 |-----|--------|
 | `]` / `[` | gain ± 0.5× (floor 1.0×) |
 | `.` / `,` | exposure ± 256 lines |
+| `q` | trigger-mode frame length (VTS): cycles **1373 / 1024 / 800 / 640 / 544** lines (~18.2 µs per line; boot default 1373, standard setup 544). Applies while `F` is on; free-run always uses 1373. Also moves the PL drop window |
+| `Q` | PL wake-frame drop (`fsin_frame_tag`, demo03 designs) on/off — **default off**. Only for the V0/V2 trigger variants, which send a dim wake frame; with the default V1 it would discard every frame |
+| `K` | OV9281 FSIN trigger variant, `F` on only — **V1 pure snapshot (default: one frame per FSIN, SOF 1.86 ms)** → V2 snapshot + r_init_man → V3 ext_vs only, VTS max → V0 snapshot + ext_vs (old default: dim wake frame at 1.06 ms, good frame one VTS later). For comparison only; V0 and V2 need `Q` |
 
 ## Overlay / display
 | Key | Action |
 |-----|--------|
 | `h` | HUD on/off: stats panel, ROI box, and the numeric DX/DY and target values (gauges and labels always shown; default off). On demo03 the DX/DY, 0–9 and "Target Offset" labels are part of the background image; the target value sits right of its gauge track |
-| `u` | Overlay renderer, cycles **mbpost → full → delta**. demo03 boots in **mbpost** (HLS core draws the preview, logit bars and DX/DY gauges straight into DDR, ~1 ms); full/delta are the MicroBlaze paths (demo01/02 have only full/delta, default full). `B` prints per-stage overlay timing (in mbpost mode `bars` = the mbpost run, `pos` = HUD value text) |
+| `u` | Overlay renderer. demo03 cycles **mbpost → full → delta** and boots in **mbpost** (the HLS core draws the preview, logit bars and DX/DY gauges straight into DDR, ~1.1 ms). demo01/02 toggle **full ↔ delta** (MicroBlaze paths, default full). `B` prints per-stage overlay timing (in mbpost mode `bars` = the mbpost run, `pos` = HUD value text) |
 | `v` | verbose console (1 Hz stats line) on/off |
 | `?` | print this key list |
 
@@ -73,15 +80,17 @@ the disc until the on-screen `REC` counter fills (e.g. `1024/1024`). Press `w` t
 and label off-board — see *Stage 3* in `README.md`
 (`scripts/dump_gallery.tcl` → `tools/roi_export.py`).
 
-## Digit position (`scu200_ai_demo02` only)
-The `mbdpu02` CNN also outputs where the digit sits in the ROI, in 28×28 model pixels
-(0 = centred; **dx** left −/right +, **dy** top +/bottom −). On HDMI, a teal **DX** gauge runs
-under the ROI preview and a **DY** gauge down its left side, scaled so each marker lines up with
-the digit centre on the preview; the values print below (`DX +1.2`, `DY -0.4`).
+## Digit position (demo02 and demo03)
+The `mbdpu02` and `mbdpu03` CNNs also output where the digit sits in the ROI (0 = centred;
+**dx** left −/right +, **dy** top +/bottom −). Units are model pixels: 28-px units on demo02,
+112-px units on demo03 (4× finer, so the same offset reads 4× larger). On HDMI, a teal **DX**
+gauge runs under the ROI preview and a **DY** gauge down its left side, scaled so each marker lines
+up with the digit centre on the preview; the values print below (`DX +1.2`, `DY -0.4`) when the HUD
+(`h`) is on.
 
 | Key | Action |
 |-----|--------|
-| `A` | auto-target on/off — once per revolution, the mean **dx** of that revolution steps the strobe `target` toward centring (1 count per 0.5 px, max 5, deadband 0.5 px; dx > 0 raises target, wrapping around 0..max). Can only be turned on while `S` is armed and `F` is on, and switches itself off if either is turned off. The **TGT** gauge reads **AUTO** while it runs (demo01/02; demo03's gauge label is the static "Target Offset", so check `AUTO=` on the verbose line). |
+| `A` | auto-target on/off — once per revolution, the mean **dx** of that revolution steps the strobe `target` toward centring (1 count per 0.5 px on demo02 / 2 px on demo03, max 5, deadband one such unit; dx > 0 raises target, wrapping around 0..max). Can only be turned on while `S` is armed and `F` is on, and switches itself off if either is turned off. The **TGT** gauge reads **AUTO** while it runs (demo01/02; demo03's gauge label is the static "Target Offset", so check `AUTO=` on the verbose line). |
 
 > **Camera watchdog.** With the strobe armed and FSIN on, if the disc turns 3 revolutions without a
 > completed frame, the OV9281 is assumed locked up and is reset and re-configured automatically
@@ -95,5 +104,6 @@ captures (`w`) carry dx/dy, exported by `roi_export.py` as `manifest.csv` column
 ## Diagnostics
 | Key | Action |
 |-----|--------|
-| `B` | test probe: frame-dones vs strobe revs (extra-frame ratio) + brightness min/max + trigger variant |
-| `K` | OV9281, trigger mode only: cycle the FSIN trigger register variant — **V1 pure snapshot (default: one frame per FSIN, SOF 1.86 ms)**, V2 snapshot+r_init_man, V3 ext_vs only with VTS max, V0 snapshot+ext_vs (old default: dim wake frame at 1.06 ms + good frame one VTS later). V0 and V2 need the PL wake-frame drop (`Q`, default now off) |
+| `B` | test probe: frame-dones vs strobe revs (extra-frame ratio) + brightness min/max + trigger variant; per-stage overlay timing; on demo03 also the `fsin_frame_tag` counters (FSIN → SOF timer). For a clean overlay reading: `B`, wait ~7 s, `B` |
+
+The trigger variant (`K`), frame length (`q`) and wake-frame drop (`Q`) are under **Camera**.

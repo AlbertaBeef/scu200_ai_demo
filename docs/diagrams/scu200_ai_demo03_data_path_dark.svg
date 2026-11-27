@@ -25,7 +25,7 @@
 
 <g class="b"><rect x="40" y="152" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="105" y="170" text-anchor="middle" dominant-baseline="central">OV9281 camera</text><text class="s" x="105" y="190" text-anchor="middle" dominant-baseline="central">640×480 · VTS 544</text></g>
 <g class="b"><rect x="190" y="152" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="255" y="170" text-anchor="middle" dominant-baseline="central">CSI-2 Rx + conv</text><text class="s" x="255" y="190" text-anchor="middle" dominant-baseline="central">RAW10 → mono8</text></g>
-<g class="c"><rect x="340" y="152" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="405" y="170" text-anchor="middle" dominant-baseline="central">fsin_frame_tag</text><text class="s" x="405" y="190" text-anchor="middle" dominant-baseline="central">Drops wake frame</text></g>
+<g class="c"><rect x="340" y="152" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="405" y="170" text-anchor="middle" dominant-baseline="central">fsin_frame_tag</text><text class="s" x="405" y="190" text-anchor="middle" dominant-baseline="central">FSIN→SOF timer</text></g>
 <g class="b"><rect x="490" y="152" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="555" y="170" text-anchor="middle" dominant-baseline="central">Frame buf write</text><text class="s" x="555" y="190" text-anchor="middle" dominant-baseline="central">3-slot ring → DDR</text></g>
 <line x1="170" y1="180" x2="188" y2="180" class="a" marker-end="url(#ar)"/>
 <line x1="320" y1="180" x2="338" y2="180" class="a" marker-end="url(#ar)"/>

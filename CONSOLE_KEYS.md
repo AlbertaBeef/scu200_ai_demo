@@ -95,4 +95,5 @@ captures (`w`) carry dx/dy, exported by `roi_export.py` as `manifest.csv` column
 ## Diagnostics
 | Key | Action |
 |-----|--------|
-| `B` | test probe: frame-dones vs strobe revs (extra-frame ratio) + brightness min/max |
+| `B` | test probe: frame-dones vs strobe revs (extra-frame ratio) + brightness min/max + trigger variant |
+| `K` | OV9281, trigger mode only: cycle the FSIN trigger register variant — **V1 pure snapshot (default: one frame per FSIN, SOF 1.86 ms)**, V2 snapshot+r_init_man, V3 ext_vs only with VTS max, V0 snapshot+ext_vs (old default: dim wake frame at 1.06 ms + good frame one VTS later). V0 and V2 need the PL wake-frame drop (`Q`, default now off) |

@@ -6,7 +6,7 @@ Each demo has its own branch: `scu200_ai_demo01`, `scu200_ai_demo02` and `scu200
 |---|---|
 | demo01 | Angle-triggered capture; `mbpre` crop → `mbdpu01` CNN (digit only); MicroBlaze overlay |
 | demo02 | `mbdpu02`, which adds a dx/dy position head; the dx auto-target loop |
-| demo03 | `mbdpu03` (fused crop + 112×112 CNN, `mbpre` removed); `mbpost` HLS overlay; `fsin_frame_tag` wake-frame drop; fcapz variant |
+| demo03 | `mbdpu03` (fused crop + 112×112 CNN, `mbpre` removed); `mbpost` HLS overlay; OV9281 snapshot trigger, one frame per strobe (`fsin_frame_tag` drop now off); fcapz variant |
 
 Inside the AI cores (mbdpu01/02 with mbpre, mbdpu03, mbpost: block diagrams, cycle budgets, resources): [`scu200_ai_cores.html`](scu200_ai_cores.html), online at https://claude.ai/artifact/2PAhRSojcVdeYKw1ceHyfm (private until shared).
 

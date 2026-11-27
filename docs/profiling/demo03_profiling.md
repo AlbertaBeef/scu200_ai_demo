@@ -12,33 +12,52 @@ All timings come from **fcapz** event-timeline captures on the `scu200_ai_demo03
 
 ## Result
 
-| | First fcapz build (07af226) | Now (d7308dd, mbpost) |
-|---|---|---|
-| Max RPM, every frame inferred (N=8) | ~110 | **358** (verified), ~380 (camera limit) |
-| Max RPM, every strobe answered (N=8) | ~145 | ~380 |
-| Good frame starts after FSIN | 26.05 ms | **10.96 ms** |
-| Frame ready after FSIN | ~34.9 ms | **19.8 ms** |
-| `mbdpu03_infer()` | 1.00 ms | 1.00 ms |
-| Overlay draw | **66.1 ms** (MicroBlaze) | **1.14 ms** (mbpost HLS) |
-| Worker done after FSIN | 86–102 ms | **22.0 ms** |
-| Display collisions (tearing) | 103 in 10 s | **0** |
+| | First fcapz build (07af226) | mbpost (d7308dd) | **Now: V1 snapshot trigger** |
+|---|---|---|---|
+| Max RPM, every frame inferred (N=8) | ~110 | 358 (verified) | **412 verified** (motor 90 %, the top tested setting) |
+| Camera-chain limit (N=8) | ~145 | ~380 | **~700** (sensor needs ~10.7 ms per frame) |
+| Frames from the sensor per FSIN | 2 (wake + good) | 2 (wake dropped in the PL) | **1** |
+| Good frame starts after FSIN | 26.05 ms | 10.96 ms | **1.86 ms** |
+| Frame ready after FSIN | ~34.9 ms | 19.8 ms | **10.7 ms** |
+| `mbdpu03_infer()` | 1.00 ms | 1.00 ms | 1.00 ms |
+| Overlay draw | **66.1 ms** (MicroBlaze) | 1.14 ms (mbpost HLS) | 1.15 ms |
+| Worker done after FSIN | 86–102 ms | 22.0 ms | **12.96 ms** |
+| Display collisions (tearing) | 103 in 10 s | 0 | 0 |
 
-**The limit is now the camera chain.** A strobe period shorter than ~19.8 ms (above ~380 RPM at N=8, or about 84 % motor) can't complete a frame before the next FSIN. The worker is idle ~17 ms of every 21 ms cycle at 358 RPM.
+**The motor is now the limit, not the pipeline.** At 412 RPM (18.2 ms strobe period) the pipeline is busy 12.96 ms of each cycle, 71 %.
 
-## Pipeline, per strobe (now, cap22 at 358 RPM)
+**What changed (2026-11-26):** the OV9281 is now in the datasheet's pure external-trigger snapshot mode. Register 0x3823 is 0x00 instead of 0x30. Its bit 4, r_init_man, was what produced the dim wake frame. See [Camera: FSIN trigger configuration](#camera-fsin-trigger-configuration).
+
+## Pipeline, per strobe (now, cap23 at 412 RPM)
 
 | Stage | Start after FSIN | Duration |
 |---|---|---|
 | FSIN strobe (`disc_strobe`) | 0 | 10 µs |
-| OV9281 wake frame (dropped in the PL by `fsin_frame_tag`) | 1.06 ms | — |
-| Good frame: SOF, then `frmbuf_wr` writes the ring slot | 10.96 ms | 8.83 ms |
-| `frmbuf_wr` IRQ → ISR (`FrmbufWrCallback`) | 19.79 ms | 8–12 µs |
-| Worker takes frame; display slot held | +0.02 ms | — |
-| `mbdpu03_infer()` (includes the camera-crop read burst, 0.162 ms) | 19.87 ms | 1.00 ms |
-| mbpost overlay (preview, bars, DX/DY gauges) + HUD values | 20.87 ms | 1.14 ms |
-| Worker done, background buffer flipped | 22.0 ms | — |
+| OV9281 wake-up and exposure (snapshot mode) | 0 | 1.86 ms |
+| Frame: SOF, then `frmbuf_wr` writes the ring slot | 1.86 ms | 8.83 ms |
+| `frmbuf_wr` IRQ → ISR (`FrmbufWrCallback`) | 10.69 ms | 6 µs |
+| Worker takes frame; display slot held | +0.01 ms | — |
+| `mbdpu03_infer()` (includes the camera-crop read burst, 0.162 ms) | 10.79 ms | 1.00 ms |
+| mbpost overlay (preview, bars, DX/DY gauges) + HUD values | 11.81 ms | 1.15 ms |
+| Worker done, background buffer flipped | 12.96 ms | — |
+| Idle until the next strobe | — | 5.25 ms |
 
-**Remaining stall:** about once per revolution, the auto-target UART print plus the target-gauge redraw delays the worker by up to ~10 ms (max worker done 32 ms). It cost no frames at 358 RPM, but it will above ~370 RPM.
+**Share of the latency:**
+- The camera is 84 % (1.86 + 8.83 ms). The frame write is the sensor reading out the frame at about 18.4 µs per line.
+- The firmware is 2.24 ms: inference + overlay.
+
+**Per-frame limits.** The ring buffer overlaps the worker with the next frame, so the 12.96 ms latency is not a speed limit:
+
+| Path | Time per frame | RPM it allows at N=8 |
+|---|---|---|
+| Sensor (wake + readout) | ~10.7 ms | ~700 |
+| Firmware (inference + overlay) | 2.24 ms | far higher |
+
+**Remaining stall:** once per revolution the auto-target step (UART print plus target-gauge redraw) delays the worker:
+- up to 9.2 ms before inference starts, or 3.5 ms before the overlay;
+- worker done at worst 22.08 ms, past the next strobe at 18.2 ms.
+
+It cost no frames at 412 RPM, because the next frame only lands 10.7 ms after its strobe. Above ~480 RPM it would start skipping one frame per revolution.
 
 ## Milestones and the captures behind them
 
@@ -58,6 +77,8 @@ RPM is computed as 60 000 / (FSIN period × N).
 | cap19 | delta overlay (changed bars only), N=8, ~171 RPM | 43.9 ms | 100 % | 28.7 ms | 49.6 ms | 0 | Every strobe inferred, digits in sequence |
 | cap20 | d6fa43e: delta, all 10 bars every frame, N=8, ~167 RPM | 45.0 ms | 100 % | 42.4 ms | 64.6 ms | 0 | Clean, but only 1.6 ms mean slack → ~173 RPM ceiling |
 | cap22 | **d7308dd mbpost**, N=8, **357 RPM** (motor 80 %) | 21.0 ms | 100 % | **1.14 ms** | **22.0 ms** | 0 | 173 frames inferred, digits 5678 1234 … with 0 out of order |
+| trig_v0…v3 | trigger-variant sweep (`K`), VTS 544, PL drop off, N=8, ~77 RPM | ~97.7 ms | see [the variant table](#camera-fsin-trigger-configuration) | 1.1 ms | — | 0 | Only V1 (0x3823=0x00) gives one frame per FSIN |
+| cap23 | **V1 snapshot trigger** default, PL drop off, N=8, **412 RPM** (motor 90 %) | 18.2 ms | 100 % (1/strobe) | 1.15 ms | **12.96 ms** | 0 | 192 frames inferred, digits in order; frame at 1.86 ms |
 
 The N-sweep captures cap13–cap15 (N=12, 10, 8) and cap21 (mbpost, 77 → 216 RPM ramp) aren't kept. They're consistent with their neighbours: 90, 70 and 6 display collisions for cap13–15, and 0 for cap21.
 
@@ -80,9 +101,30 @@ The N-sweep captures cap13–cap15 (N=12, 10, 8) and cap21 (mbpost, 77 → 216 R
 - Post-synthesis: 5.3k LUT, 12 BRAM, 3 DSP.
 - `u` cycles mbpost → full → delta for A/B comparisons.
 
-## Camera: frame length (VTS) vs good-frame arrival
+## Camera: FSIN trigger configuration
 
-The OV9281 sends a wake frame ~1.06 ms after FSIN, then the good frame one frame length later. Each line is ~18.2 µs (HTS 1456).
+Datasheet §4.8.3: in external-trigger snapshot mode a FSIN rising edge wakes the OV9281. It integrates, reads out {0x303F} frames, then goes back to sleep. Our trigger config was taken from Arducam's `ov9281_external_trigger.c`, which also sets 0x3823=0x30 (ext_vs_en + r_init_man). That produced a dim wake frame 1.06 ms after FSIN and the good frame one VTS later.
+
+The `K` key cycles four variants. The sweep below was run at ~77 RPM, N=8, VTS 544, with the PL drop off; captures are `trig_v0…v3`.
+
+| Variant | 0x3823 | Other writes | Frames per FSIN | First SOF after FSIN | Brightness | Result |
+|---|---|---|---|---|---|---|
+| V0 snapshot + ext_vs (old default) | 0x30 | 4F00=01 3030=04 303F=01 0100=00 | 2 | 1.06 ms (dim), 10.96 ms (good) | 21 / ~195 | needs the PL drop |
+| **V1 pure snapshot (default)** | **0x00** | same | **1** (132/132) | **1.86 ms** | 191–200 | **one good frame** |
+| V2 snapshot + r_init_man | 0x10 | same | 2 | 1.06 / 10.96 ms | 21 / ~199 | same as V0 |
+| V3 ext_vs only, streaming, VTS 0xFFFF | 0x30 | 4F00=00 3030=10 0100=01 | 0 or 1 (12/282) | ~70 ms | 251 (saturated) | fails |
+
+**What the sweep shows:**
+- **r_init_man (0x3823 bit 4) produces the wake frame.** V2 differs from V1 only in that bit and reproduces V0 exactly.
+- **An earlier pure-snapshot attempt (demo01, before 1728b3e) failed only because it used 0x303F=0** (zero frames). With 0x303F=1, snapshot behaves as the datasheet describes.
+- **V1 was only measured at VTS 544.** In snapshot mode the SOF should follow the wake-up and exposure, not VTS, so `q` should matter only for V0/V2. That hasn't been checked.
+- **The image is exposed 9.1 ms earlier relative to the strobe angle.** Auto-target re-centres it within a few revolutions; the target moved from ~12 to ~27.
+
+**PL drop (`fsin_frame_tag`):** now **off** by default (`Q` toggles it). V1 sends no wake frame, and the 6 ms drop window would discard its 1.86 ms frame. The core stays in the design for V0/V2 and as an FSIN → SOF timer; the `B` key prints its counters.
+
+### Frame length (VTS) with the old V0 trigger
+
+With V0, the good frame came one frame length after the wake frame at ~1.06 ms. Each line is ~18.2 µs (HTS 1456).
 
 | VTS (lines) | Frame length | Good frame starts after FSIN | Strobes answered at a 46 ms period |
 |---|---|---|---|
@@ -90,14 +132,14 @@ The OV9281 sends a wake frame ~1.06 ms after FSIN, then the good frame one frame
 | 1024 | ~18.6 ms | 19.70 ms | 100 % |
 | 800 | ~14.6 ms | 15.62 ms | 100 % |
 | 640 | ~11.6 ms | 12.71 ms | 100 % |
-| 544 (current, `q`×4) | ~9.9 ms | 10.96 ms | 100 % |
+| 544 (`q`×4) | ~9.9 ms | 10.96 ms | 100 % |
 
-The PL drop window must close between the wake frame and the good frame. At VTS 544 it is 6010 µs, set from the console with `Q`.
+The PL drop window had to close between the wake frame and the good frame: 6010 µs at VTS 544.
 
 **Next levers on the camera chain (not done):**
-- fewer readout rows (e.g. 448 instead of 496);
-- a shorter HTS;
-- getting the sensor to send one frame per FSIN instead of a wake frame plus a good frame.
+- **A sensor readout window.** The CNN only uses a 112×112 crop of the 640×480 frame, so fewer readout rows would shorten the 8.83 ms frame write.
+- **A shorter HTS.**
+- **Moving auto-target out of the worker path**, to remove the 22 ms once-per-revolution outlier.
 
 ## Motor setting vs RPM
 
@@ -108,7 +150,7 @@ Medians of ~15 000 console status lines. The first 3 lines after each speed chan
 | RPM | 34 | 78 | 127 | 172 | 220 | 268 | 315 | 361 | 409 |
 | Strobe period | 220 ms | 96 ms | 59 ms | 43.6 ms | 34.1 ms | 28.0 ms | 23.8 ms | 20.8 ms | 18.3 ms |
 
-The relationship is close to linear, at about 47.5 RPM per 10 %. 90 % (18.3 ms) is below the 19.8 ms camera chain, so it isn't reachable yet.
+The relationship is close to linear, at about 47.5 RPM per 10 %. With the V1 trigger, 90 % (18.3 ms) runs clean (cap23). Under the old V0 trigger it wasn't reachable, because the camera chain needed 19.8 ms.
 
 ## Published timelines
 
@@ -126,6 +168,8 @@ These are private claude.ai artifacts: interactive swimlanes with wheel/pinch to
 | cap20, 0–75 ms zoom | https://claude.ai/artifact/YNbRddqjBf3J25uNJLTtuN |
 | cap22 (mbpost, 358 RPM) | https://claude.ai/artifact/89eWcN8rxbm7GcjLVQPyFJ |
 | cap22, first 100 ms | https://claude.ai/artifact/9Ubv8fWufMa8MwJJyUjF9q |
+| cap23 (V1 trigger, 412 RPM) | https://claude.ai/artifact/KwqALoCpFhUu5MYxDWSZpH |
+| cap23, first 50 ms | https://claude.ai/artifact/QXd7pGsF3kB1K8uMQgg494 |
 
 ## How to reproduce
 
@@ -138,10 +182,10 @@ fcapz --backend hw_server --port 3121 --tap xcsu200p --chain 3 capture \
   --trigger-mode edge_detect --trigger-value 0x2 --trigger-mask 0x2 \
   --pretrigger 64 --posttrigger 4000 --timeout 60 --format json --out capN.json
 
-python3 scripts/fcapz_profile.py docs/profiling/captures/cap22.json.gz        # per-stage table
-python3 scripts/fcapz_timeline.py docs/profiling/captures/cap22.json.gz -o cap22.html
-python3 scripts/fcapz_window.py docs/profiling/captures/cap22.json.gz w.json 0 100   # zoom
-python3 scripts/fcapz_timeline.py w.json -o cap22_100ms.html
+python3 scripts/fcapz_profile.py docs/profiling/captures/cap23.json.gz        # per-stage table
+python3 scripts/fcapz_timeline.py docs/profiling/captures/cap23.json.gz -o cap23.html
+python3 scripts/fcapz_window.py docs/profiling/captures/cap23.json.gz w.json 0 100   # zoom
+python3 scripts/fcapz_timeline.py w.json -o cap23_100ms.html
 ```
 
 A capture is 4K change-only samples. That covers 3.6–12.8 s, depending on how busy the pipeline is.

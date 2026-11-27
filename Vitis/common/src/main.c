@@ -123,8 +123,9 @@ static uint32_t g_cam_wd_count = 0;     /* watchdog re-inits since boot */
 static const uint16_t k_trig_vts[] = { OV9281_VTS_DEFAULT, 1024, 800, 640, 544 };
 #define TRIG_VTS_N (sizeof(k_trig_vts) / sizeof(k_trig_vts[0]))
 static unsigned g_trig_vts_i = 0;
-static int      g_pl_drop    = 1;
-static uint32_t trig_vts(void) { return k_trig_vts[g_trig_vts_i]; }
+static int      g_pl_drop    = 0;   /* off: the default V1 snapshot trigger sends no wake frame (its
+                                        * SOF at 1.86 ms would fall inside the drop window) */
+static uint32_t trig_vts(void) { uint32_t v = ov9281_trigger_variant_vts(); return v ? v : k_trig_vts[g_trig_vts_i]; }
 static uint32_t fsin_drop_window_us(void) { return 1060u + (trig_vts() * 182u) / 20u; }
 static void fsin_tag_apply(void)
 {
@@ -486,7 +487,7 @@ static int mnist_crop_key(int ch)
         xil_printf("Motor Encoder: c enc-check\r\n");
         xil_printf("Strobe:  S arm/disarm | F FSIN trigger | N captures/rev (1/2/4/8/16) | T/G target +-5 | C/V cpr +-0.1 (drift-null) | Y status\r\n");
         xil_printf("Crop:    z/x zoom in/out | j/l pan L/R | i/k pan U/D | o recenter\r\n");
-        xil_printf("Camera:  ]/[ gain +-0.5x | ./, exposure +-256 | q trigger VTS 1373/1024/800/640/544 | Q PL wake-frame drop\r\n");
+        xil_printf("Camera:  ]/[ gain +-0.5x | ./, exposure +-256 | q trigger VTS 1373/1024/800/640/544 | Q PL wake-frame drop | K trigger variant\r\n");
         xil_printf("Overlay: h HUD (stats, ROI box, DX/DY + TGT values) on/off | u full/delta redraw | v verbose console on/off | ? this help\r\n");
         xil_printf("Capture: w record ROI training data on/off (fills DDR gallery for JTAG dump)\r\n");
 #ifdef MBDPU_HAS_POS
@@ -514,14 +515,24 @@ static int mnist_crop_key(int ch)
                          (unsigned long)trig_vts(), (unsigned long)(trig_vts() * 182u / 10u),
                          (unsigned long)fsin_drop_window_us(),
                          g_trig_active ? "" : " (applies when F is on)"); return 1;
+    case 'K': {  /* EXPERIMENT: cycle the OV9281 FSIN trigger variant (V0..V3), trigger mode only */
+              unsigned v = (ov9281_trigger_variant() + 1u) % ov9281_trigger_variants();
+              if (!g_ov9281_present || !g_trig_active) {
+                  xil_printf("trigger variant: needs F (FSIN trigger) on\r\n"); return 1; }
+              ov9281_set_trigger_variant(g_ov9281_iic, v);
+              ov9281_set_vts(g_ov9281_iic, trig_vts());
+              fsin_tag_apply();
+              xil_printf("trigger variant: %s, VTS=%lu, PL drop %s\r\n", ov9281_trigger_variant_name(v),
+                         (unsigned long)trig_vts(), g_pl_drop ? "ON" : "off"); return 1; }
     case 'Q': g_pl_drop = !g_pl_drop; fsin_tag_apply();             /* PL wake-frame drop */
               xil_printf("PL wake-frame drop: %s\r\n", g_pl_drop ? "ON" : "off (SW dim gate only)");
               return 1;
     case 'B': { /* TEST probe: frame-dones (ISR) vs strobe revs -> extra-frame ratio; bright range */
                 uint32_t seq = g_cam_frmbuf ? g_cam_frmbuf->FrameSeq : 0;
-                xil_printf("probe: frame-dones=%lu revs=%lu bright[min=%lu max=%lu]\r\n",
+                xil_printf("probe: frame-dones=%lu revs=%lu bright[min=%lu max=%lu] variant=%s\r\n",
                            (unsigned long)seq, (unsigned long)disc_strobe_revs(),
-                           (unsigned long)g_frm_min, (unsigned long)g_frm_max);
+                           (unsigned long)g_frm_min, (unsigned long)g_frm_max,
+                           ov9281_trigger_variant_name(ov9281_trigger_variant()));
 #ifdef FSIN_TAG_PRESENT
                 { u32 lf = FSIN_TAG_RD(FTAG_LAST_FRAME);
                   xil_printf("fsin_tag: fsin=%lu dropped=%lu window=%lu us drop=%s | last SOF %lu us after FSIN, idx %lu%s\r\n",

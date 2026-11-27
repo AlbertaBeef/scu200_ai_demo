@@ -29,6 +29,14 @@ int ov9281_write(uint8_t iic_id, uint16_t addr, uint8_t data);
  * per rising pulse from the disc_strobe core); enable=0 restores continuous streaming.
  * Call ONLY after ov9281_config(). Regs verified against Arducam ov9281_external_trigger.c. */
 int ov9281_set_trigger_mode(uint8_t iic_id, int enable);
+/* FSIN trigger variants (K key): V0 snapshot+ext_vs (old default), V1 pure snapshot (default),
+ * V2 snapshot+r_init_man, V3 ext_vs only with VTS max. set_trigger_variant re-applies trigger
+ * mode; trigger_variant_vts() is the VTS the variant needs (0 = caller's choice). */
+int         ov9281_set_trigger_variant(uint8_t iic_id, unsigned v);
+unsigned    ov9281_trigger_variant(void);
+unsigned    ov9281_trigger_variants(void);
+const char *ov9281_trigger_variant_name(unsigned v);
+uint32_t    ov9281_trigger_variant_vts(void);
 
 /* Set the manual exposure, in row/line units (registers 0x3500/0x3501/0x3502 = lines<<4).
  * Note: in FSIN snapshot/trigger mode the integration is gated by the wake timing, so this

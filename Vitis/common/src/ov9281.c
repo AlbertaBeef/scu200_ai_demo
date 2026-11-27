@@ -53,24 +53,34 @@ static const ov9281_reg_t ov9281_mode_640x480[] = {
 };
 
 /* --- External-trigger (FSIN) mode -------------------------------------------------
- * Verified against Arducam's ov9281_external_trigger.c. Applied on top of the streaming
- * config: 0x3823=0x30 enables frame-sync, the 0x30xx/0x4f00 writes set up the sync clock
- * domain, and the closing 0x0100=0x00 drops continuous streaming so the sensor emits
- * exactly one frame per rising edge on the FSIN pad (driven by MOTOR_XVS <- disc_strobe). */
-/* Known-working external-trigger config (snapshot wake + ext_vs). Datasheet §4.8.3: FSIN
- * wakes the sensor -> integrate -> read out {0x303F} frames -> sleep. Emits ~2 frames/pulse
- * (a dim wake/reset frame + the good frame); the software good-frame gate in main.c drops the
- * dim one. Sensor-side single-frame-per-pulse is still under investigation (0x303F frame-count
- * test was cut short by a USB re-enumeration): snapshot always shows the dim wake frame and
- * ext_vs-only free-runs, so the SW gate remains the working path for now.
- *   0x3030 b[2] r_fsin_wake_up_en=1 (snapshot), 0x3823 b[5] ext_vs_en + b[4] r_init_man,
- *   0x303F=1 frames, 0x0100=0x00 standby. */
+ * Default: V1, the datasheet's external-trigger snapshot mode (section 4.8.3): 0x4F00=1 low
+ * power, 0x3030 b[2] r_fsin_wake_up_en, 0x303F=1 frame per FSIN, 0x0100=0 standby, and
+ * 0x3823=0x00. A FSIN rising edge wakes the sensor, integrates and reads out exactly ONE
+ * frame, SOF 1.86 ms after FSIN (fcapz, 2026-11-26), then it sleeps.
+ * Arducam's ov9281_external_trigger.c (and our old default, V0) also sets 0x3823=0x30
+ * (ext_vs_en + r_init_man). r_init_man (b[4]) is what produces the dim "wake" frame at
+ * 1.06 ms, with the good frame one VTS later (10.96 ms at VTS 544); V2 (0x3823=0x10) showed
+ * the same two frames. The earlier pure-snapshot test failed only because it used 0x303F=0. */
+/* Trigger variants (K key), measured with fcapz at 77 RPM, N=8, VTS 544, PL drop off:
+ *   V0 snapshot + ext_vs (0x3823=0x30): the old default (Arducam's config). Two frames per
+ *      FSIN: dim at 1.06 ms (brightness ~21), good one VTS later (10.96 ms).
+ *   V1 pure snapshot (0x3823=0x00), the DEFAULT: one frame per FSIN, SOF 1.86 ms after FSIN.
+ *   V2 snapshot + r_init_man (0x3823=0x10): two frames, like V0 -> r_init_man causes the dim one.
+ *   V3 ext_vs only, streaming, VTS 0xFFFF: free-runs, not re-aligned by FSIN (4% of strobes).
+ * Each variant is applied on top of ov9281_trigger_off so the variants don't leak. */
+#define OV9281_TRIG_VARIANTS 4
+static const char *const k_trig_var_name[OV9281_TRIG_VARIANTS] = {
+    "V0 snapshot+ext_vs", "V1 pure snapshot", "V2 snapshot+r_init_man", "V3 ext_vs only, VTS max" };
+static unsigned s_trig_var = 1;   /* default: V1 pure snapshot (one frame per FSIN) */
 static const ov9281_reg_t ov9281_trigger_on[] = {   /* known-working: snapshot wake + ext_vs */
     {0x3006,0x00},
     {0x4f00,0x01},{0x303f,0x01},{0x302c,0x00},{0x302f,0x7f},   /* r_frame_on_num = 1 */
     {0x3030,0x04},                                            /* wake on (snapshot, gated) */
-    {0x3823,0x30},                                            /* ext_vs_en + r_init_man */
+    {0x3823,0x30},                                            /* overridden per variant: V0 0x30, V1 0x00, V2 0x10 */
     {0x0100,0x00},                                            /* standby */
+};
+static const ov9281_reg_t ov9281_trigger_v3[] = {   /* ext_vs frame-sync, continuous streaming */
+    {0x3006,0x00},{0x4f00,0x00},{0x3030,0x10},{0x3823,0x30},{0x0100,0x01},
 };
 /* Undo: disable frame-sync, restore the streaming clock reg, resume continuous readout. */
 static const ov9281_reg_t ov9281_trigger_off[] = {
@@ -201,27 +211,55 @@ int ov9281_set_vts(uint8_t iic_id, uint32_t vts)
     return XST_SUCCESS;
 }
 
-/* Switch FSIN external-trigger mode on/off. See ov9281.h. */
-int ov9281_set_trigger_mode(uint8_t iic_id, int enable)
+static int ov9281_write_table(uint8_t iic_id, const ov9281_reg_t *t, size_t n, uint8_t v3823)
 {
-    const ov9281_reg_t *t = enable ? ov9281_trigger_on : ov9281_trigger_off;
-    size_t n = enable ? sizeof(ov9281_trigger_on)/sizeof(ov9281_trigger_on[0])
-                      : sizeof(ov9281_trigger_off)/sizeof(ov9281_trigger_off[0]);
     for (size_t i = 0; i < n; i++) {
-        int Status = ov9281_write(iic_id, t[i].addr, t[i].data);
+        uint8_t d = (t[i].addr == 0x3823 && t == ov9281_trigger_on) ? v3823 : t[i].data;
+        int Status = ov9281_write(iic_id, t[i].addr, d);
         if (Status != XST_SUCCESS) {
             xil_printf("  ov9281 trigger: I2C write FAILED at reg 0x%04x\r\n", t[i].addr);
             return Status;
         }
         usleep(1000);
     }
-    uint8_t v3823 = 0, v0100 = 0;
-    ov9281_read(iic_id, 0x3823, &v3823);
-    ov9281_read(iic_id, 0x0100, &v0100);
-    xil_printf("  ov9281: FSIN trigger %s (0x3823=0x%02x stream=0x%02x)\r\n",
-               enable ? "ON (frames gated by FSIN)" : "OFF (free-run)", v3823, v0100);
     return XST_SUCCESS;
 }
+
+/* Switch FSIN external-trigger mode on/off (on = the selected variant). See ov9281.h. */
+int ov9281_set_trigger_mode(uint8_t iic_id, int enable)
+{
+    int s;
+    IicReset(iic_id);   /* SCU200 camera I2C is flaky; clean the bus so the polled writes can't hang */
+    if (!enable)
+        s = ov9281_write_table(iic_id, ov9281_trigger_off, sizeof(ov9281_trigger_off)/sizeof(ov9281_trigger_off[0]), 0);
+    else if (s_trig_var == 3)
+        s = ov9281_write_table(iic_id, ov9281_trigger_v3, sizeof(ov9281_trigger_v3)/sizeof(ov9281_trigger_v3[0]), 0);
+    else
+        s = ov9281_write_table(iic_id, ov9281_trigger_on, sizeof(ov9281_trigger_on)/sizeof(ov9281_trigger_on[0]),
+                               s_trig_var == 1 ? 0x00 : s_trig_var == 2 ? 0x10 : 0x30);
+    if (s != XST_SUCCESS) return s;
+    uint8_t v3030 = 0, v303f = 0, v3823 = 0, v4f00 = 0, v0100 = 0;
+    ov9281_read(iic_id, 0x3030, &v3030); ov9281_read(iic_id, 0x303f, &v303f);
+    ov9281_read(iic_id, 0x3823, &v3823); ov9281_read(iic_id, 0x4f00, &v4f00);
+    ov9281_read(iic_id, 0x0100, &v0100);
+    xil_printf("  ov9281: FSIN trigger %s%s (0x3030=0x%02x 0x303F=0x%02x 0x3823=0x%02x 0x4F00=0x%02x stream=0x%02x)\r\n",
+               enable ? "ON " : "OFF (free-run)", enable ? k_trig_var_name[s_trig_var] : "",
+               v3030, v303f, v3823, v4f00, v0100);
+    return XST_SUCCESS;
+}
+
+/* Experimental trigger variants (K key). Re-applies trigger mode with variant v. */
+int ov9281_set_trigger_variant(uint8_t iic_id, unsigned v)
+{
+    s_trig_var = v % OV9281_TRIG_VARIANTS;
+    int s = ov9281_set_trigger_mode(iic_id, 0);     /* back to the streaming baseline first */
+    if (s != XST_SUCCESS) return s;
+    return ov9281_set_trigger_mode(iic_id, 1);
+}
+unsigned    ov9281_trigger_variant(void)          { return s_trig_var; }
+unsigned    ov9281_trigger_variants(void)         { return OV9281_TRIG_VARIANTS; }
+const char *ov9281_trigger_variant_name(unsigned v){ return k_trig_var_name[v % OV9281_TRIG_VARIANTS]; }
+uint32_t    ov9281_trigger_variant_vts(void)      { return s_trig_var == 3 ? 0xFFFFu : 0u; }
 
 /* Reset via the camera power-enable GPIO (same scheme as IMX219/IMX477). */
 int ov9281_reset(XGpio *gpio, uint32_t gpio_mask)

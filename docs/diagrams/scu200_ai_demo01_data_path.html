@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCU200 demo01 data path</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@700&family=Red+Hat+Text:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* VOICE: clinical engineering reference, calm and precise
+   IDEA: a datasheet block-diagram page
+   PICTURE: the full data-path diagram, large, first screen
+   COLOUR and TYPE: white / deep slate, teal for custom HLS cores, violet for DDR; Red Hat
+   LAYOUT: title, diagram, then a compact notes grid */
+:root{color-scheme:light dark;--bg:light-dark(#ffffff,#11151c);--ink:light-dark(#18202b,#e6eaf0);--mute:light-dark(#5b6675,#9aa5b4);
+--line:light-dark(#6b7684,#8d98a6);--box:light-dark(#f3f5f8,#1b222c);--boxs:light-dark(#8d98a6,#5b6675);
+--teal:light-dark(#e1f5ee,#0b3f33);--teals:light-dark(#0f6e56,#5dcaa5);--tealt:light-dark(#085041,#c9f1e2);
+--vio:light-dark(#eeedfe,#2b2563);--vios:light-dark(#534ab7,#afa9ec);--viot:light-dark(#3c3489,#dcd9fb);--coral:#d85a30}
+:root[data-theme=light]{color-scheme:light}:root[data-theme=dark]{color-scheme:dark}
+*{box-sizing:border-box;min-width:0}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 "Red Hat Text",system-ui,sans-serif;overflow-x:clip}
+.band{padding:clamp(28px,4vw,56px) max(5vw,16px);max-width:1240px;margin:0 auto}
+h1{font:700 clamp(28px,4vw,44px)/1.05 "Red Hat Display",system-ui,sans-serif;margin:0 0 8px;text-wrap:balance}
+.lede{color:var(--mute);margin:0 0 24px;max-width:70ch}
+.lede a{color:inherit}
+.scroll{overflow-x:auto}
+svg.dp{display:block;width:100%;min-width:640px;height:auto}
+svg text{font-family:"Red Hat Text",system-ui,sans-serif;fill:var(--ink)}
+.t{font-size:14px;font-weight:500}.s{font-size:12px;fill:var(--mute)}
+.b rect{fill:var(--box);stroke:var(--boxs)}
+.c rect{fill:var(--teal);stroke:var(--teals)}.c .t{fill:var(--tealt)}.c .s{fill:var(--teals)}
+.d rect{fill:var(--vio);stroke:var(--vios)}.d .t{fill:var(--viot)}.d .s{fill:var(--vios)}
+.a{stroke:var(--line);stroke-width:1.2;fill:none}
+.reg rect{fill:none}.reg .k{font-weight:500;fill:var(--tealt)}
+.legend{display:flex;flex-wrap:wrap;gap:8px 24px;margin-top:12px;font-size:13px;color:var(--mute)}
+.legend span{display:inline-flex;align-items:center;gap:8px}
+.sw{width:14px;height:14px;border-radius:3px;border:1px solid}
+.sw.c{background:var(--teal);border-color:var(--teals)}.sw.d{background:var(--vio);border-color:var(--vios)}
+.sw.l{height:0;width:18px;border:0;border-top:1.5px dashed var(--line);border-radius:0}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:20px 32px;margin-top:28px}
+.notes h2{font:500 16px/1.3 "Red Hat Text",sans-serif;margin:0 0 4px}
+.notes p{margin:0;color:var(--mute);font-size:15px}
+code{font-size:.92em;overflow-wrap:anywhere}
+.foot{font-size:13px;color:var(--mute);margin-top:28px}
+</style>
+</head>
+<body>
+<main class="band">
+<h1>SCU200 AI demo01: data path</h1>
+<p class="lede">Angle-triggered OV9281 capture → DDR → hardware crop/downscale → INT8 CNN (digit) → MicroBlaze overlay → HDMI. The strobe angle is set by hand (no position head yet). Traced from the <a href="https://github.com/AlbertaBeef/scu200_ai_demo/tree/scu200_ai_demo01">scu200_ai_demo01</a> branch (<code>bd_scu200_ai_demo01.tcl</code>, <code>main.c</code>).</p>
+<div class="scroll">
+<svg class="dp" viewBox="0 0 680 520" role="img" aria-label="Data path block diagram of scu200_ai_demo01">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+<g class="b"><rect x="40" y="56" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="105" y="74" text-anchor="middle" dominant-baseline="central">Spinning disc</text><text class="s" x="105" y="94" text-anchor="middle" dominant-baseline="central">Motor + encoder</text></g>
+<g class="c"><rect x="190" y="56" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="255" y="74" text-anchor="middle" dominant-baseline="central">disc_strobe</text><text class="s" x="255" y="94" text-anchor="middle" dominant-baseline="central">Angle → FSIN pulse</text></g>
+<line x1="170" y1="84" x2="188" y2="84" class="a" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+<g class="c reg"><rect x="342" y="48" width="298" height="96" rx="8" stroke-width="0.8" stroke-dasharray="4 3"/>
+<text class="t" x="356" y="64" dominant-baseline="central">disc_strobe registers (AXI-Lite)</text>
+<text class="s" x="356" y="84" dominant-baseline="central"><tspan class="k">cpr</tspan>  48 × 20.409 = 979.6 counts/rev (Q16)</text>
+<text class="s" x="356" y="100" dominant-baseline="central"><tspan class="k">gears</tspan>  (22·22·22·23)/(12·10·10·10) · C/V trim</text>
+<text class="s" x="356" y="116" dominant-baseline="central"><tspan class="k">target</tspan>  1st fire angle · T/G ±5 (manual)</text>
+<text class="s" x="356" y="132" dominant-baseline="central"><tspan class="k">fire_step</tspan>  cpr/N → N fires per rev (N key)</text></g>
+<line x1="342" y1="84" x2="322" y2="84" class="a" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+<path d="M255 112 L255 132 L105 132 L105 150" class="a" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+
+<g class="b"><rect x="40" y="152" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="105" y="170" text-anchor="middle" dominant-baseline="central">OV9281 camera</text><text class="s" x="105" y="190" text-anchor="middle" dominant-baseline="central">640×480 RAW10</text></g>
+<g class="b"><rect x="190" y="152" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="255" y="170" text-anchor="middle" dominant-baseline="central">MIPI CSI-2 Rx</text><text class="s" x="255" y="190" text-anchor="middle" dominant-baseline="central">2-lane, 420 Mbps</text></g>
+<g class="b"><rect x="340" y="152" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="405" y="170" text-anchor="middle" dominant-baseline="central">Subset conv</text><text class="s" x="405" y="190" text-anchor="middle" dominant-baseline="central">RAW10 → mono8</text></g>
+<g class="b"><rect x="490" y="152" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="555" y="170" text-anchor="middle" dominant-baseline="central">Frame buf write</text><text class="s" x="555" y="190" text-anchor="middle" dominant-baseline="central">AXI4 → DDR</text></g>
+<line x1="170" y1="180" x2="188" y2="180" class="a" marker-end="url(#ar)"/>
+<line x1="320" y1="180" x2="338" y2="180" class="a" marker-end="url(#ar)"/>
+<line x1="470" y1="180" x2="488" y2="180" class="a" marker-end="url(#ar)"/>
+<line x1="555" y1="208" x2="555" y2="246" class="a" marker-end="url(#ar)"/>
+
+<g class="d"><rect x="40" y="248" width="580" height="56" rx="8" stroke-width="0.6"/><text class="t" x="330" y="266" text-anchor="middle" dominant-baseline="central">DDR4 via AXI SmartConnect (shared memory)</text><text class="s" x="330" y="286" text-anchor="middle" dominant-baseline="central">Cam frames 0xA000_0000 · model blobs 0xB000_0000 · overlay 0xB500_0000</text></g>
+<line x1="105" y1="304" x2="105" y2="342" class="a" marker-end="url(#ar)"/>
+<line x1="405" y1="344" x2="405" y2="306" class="a" marker-end="url(#ar)"/>
+<line x1="555" y1="304" x2="555" y2="342" class="a" marker-end="url(#ar)"/>
+
+<g class="c"><rect x="40" y="344" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="105" y="362" text-anchor="middle" dominant-baseline="central">mbpre</text><text class="s" x="105" y="382" text-anchor="middle" dominant-baseline="central">Crop → 28×28 INT8</text></g>
+<g class="c"><rect x="190" y="344" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="255" y="362" text-anchor="middle" dominant-baseline="central">mbdpu01</text><text class="s" x="255" y="382" text-anchor="middle" dominant-baseline="central">CNN: digit only</text></g>
+<g class="b"><rect x="340" y="344" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="405" y="362" text-anchor="middle" dominant-baseline="central">MicroBlaze</text><text class="s" x="405" y="382" text-anchor="middle" dominant-baseline="central">Argmax, HUD draw</text></g>
+<g class="b"><rect x="490" y="344" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="555" y="362" text-anchor="middle" dominant-baseline="central">Frame buf reads</text><text class="s" x="555" y="382" text-anchor="middle" dominant-baseline="central">Camera + bg</text></g>
+<line x1="170" y1="372" x2="188" y2="372" class="a" marker-end="url(#ar)"/>
+<line x1="320" y1="372" x2="338" y2="372" class="a" marker-end="url(#ar)"/>
+<line x1="555" y1="400" x2="555" y2="434" class="a" marker-end="url(#ar)"/>
+
+<g class="b"><rect x="490" y="436" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="555" y="454" text-anchor="middle" dominant-baseline="central">Video mixer</text><text class="s" x="555" y="474" text-anchor="middle" dominant-baseline="central">Layers → 1080p</text></g>
+<g class="b"><rect x="340" y="436" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="405" y="454" text-anchor="middle" dominant-baseline="central">HDMI TX SS</text><text class="s" x="405" y="474" text-anchor="middle" dominant-baseline="central">4 pixels/clock</text></g>
+<g class="b"><rect x="190" y="436" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="255" y="454" text-anchor="middle" dominant-baseline="central">HDMI PHY</text><text class="s" x="255" y="474" text-anchor="middle" dominant-baseline="central">GT transceivers</text></g>
+<g class="b"><rect x="40" y="436" width="130" height="56" rx="8" stroke-width="0.6"/><text class="t" x="105" y="454" text-anchor="middle" dominant-baseline="central">HDMI display</text><text class="s" x="105" y="474" text-anchor="middle" dominant-baseline="central">1920×1080</text></g>
+<line x1="490" y1="464" x2="472" y2="464" class="a" marker-end="url(#ar)"/>
+<line x1="340" y1="464" x2="322" y2="464" class="a" marker-end="url(#ar)"/>
+<line x1="190" y1="464" x2="172" y2="464" class="a" marker-end="url(#ar)"/>
+</svg>
+</div>
+<div class="legend"><span><i class="sw c"></i>Custom HLS core</span><span><i class="sw d"></i>Shared DDR4</span><span><i class="sw l"></i>Control / trigger / register path</span></div>
+
+<section class="notes">
+<div><h2>All AI traffic goes through DDR</h2><p><code>mbpre</code> writes the 28×28 image to <code>0xB0020000</code>; <code>mbdpu01</code> reads it plus weights/params (<code>0xB0000000</code> / <code>0xB0010000</code>) and writes <code>out[11]</code> — 10 logits and the argmax — to <code>0xB0030000</code>.</p></div>
+<div><h2>Clock domains</h2><p>Camera, DDR and display at 300 MHz; <code>disc_strobe</code>, <code>mbpre</code>, <code>mbdpu01</code> at 100 MHz, bridged by the SmartConnect.</p></div>
+<div><h2>Camera reader</h2><p>3-slot ring at <code>0xA0000000</code> into mixer layer 1 at (160, 500). In trigger mode the firmware holds the classified frame on screen and drops the dim wake frames.</p></div>
+<div><h2>Background reader</h2><p>1920×1080 image into the mixer master layer. The HUD is drawn into a back buffer (<code>0xB5…</code> / <code>0xB6…</code>) and page-flipped at the frame boundary.</p></div>
+<div><h2>cpr and target</h2><p><code>cpr</code> is encoder counts per disc revolution in Q16. The “20.4:1” gearbox is a four-stage spur train, (22×22×22×23)/(12×10×10×10) = 244904/12000 ≈ 20.409, so 48 CPR × 20.409 ≈ 979.6 counts/rev — the firmware's calibrated value (979.6 × 65536), not the nominal 48 × 20.4 = 979.2. Trimmed live with C/V in 0.1-count steps over 959.6–999.6. <code>target</code> is the angle of the first trigger each revolution, set with T/G; triggers follow at <code>target + k·fire_step</code>, and a new target takes effect at the next wrap.</p></div>
+<div><h2>Left out</h2><p>UART console, I²C/clock-chip setup, motor PWM/GPIO, and the ROI capture gallery at <code>0xBA000000</code> (dumped over JTAG for retraining).</p></div>
+</section>
+<p class="foot">Sketch for orientation; block names follow the Vivado block design.</p>
+</main>
+</body>
+</html>
